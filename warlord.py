@@ -7,11 +7,15 @@
 * 地图 10x10，每格一种地形：障碍(不可通行) / 通路 / 城池(可通行，防御 +30%，驻守回血更多)
   地形用整数枚举定义，以后想加第 4 种（如"树林"）只需在 TERRAIN_* 后面追加并把
   TERRAIN_NAME / TERRAIN_COLOR / REGEN 里补一条即可。
-* 地图不做随机生成，固定写在与本文件同目录的 map.txt 里：10 行 x 10 列、正好 10 座城池、
-  双方各 3 个出生点，左右可以不对称。改完地图保存后，在游戏里按 R 即可按新地图重开。
-* 双方各有 3 名武将，属性：
-    - 武力 might     ：固定值，决定战斗判定权重
-    - 智力 intellect ：固定值，目前只作展示，不参与计算
+* 地图不做随机生成，固定写在与本文件同目录的 map.txt 里：10 行 x 10 列、正好 10 座城池。
+  map.txt 只画地形，不再标出生点；开局时每方上阵的武将随机落在自己半场的通路或城池上
+  （玩家二（魏）在北、玩家一（蜀）在南，两半场分界由 warlords.py 的 SPAWN_ROWS 决定）。
+  改完地图保存后，在游戏里按 R 即可按新地图重开。
+* 武将写在同目录的 generals.txt 里，魏蜀各 10 名（武力/智力都是固定值）：每局开局时
+  每方从本方 10 名里随机抽 5 名上阵，抽中的武将再随机落到本方半场。改完按 R 即可重开。
+* 每名武将的属性（都在 generals.txt 里配置）：
+    - 武力 might     ：固定值，1-MAX_STAT，决定战斗判定权重和伤害
+    - 智力 intellect ：固定值，1-MAX_STAT，目前只作展示，不参与计算
     - 体力 stamina   ：可变值，上限 100。只有战斗会消耗体力；
                        每回合开始时按所在地形恢复（通路 +8 / 城池 +16）
 * 移动：每名武将有 MOVE_POINTS 点移动力，回合开始时重置为 3，每挪到相邻一格花 1 点，
@@ -22,7 +26,8 @@
 * 交战：把己方武将的移动目标点成"相邻的敌方武将格子"（踏进去）即触发交战，消耗 1 点移动力。
         必须从相邻格踏入，不能隔着格子冲锋。
         先按双方战力加权随机判定胜负，再结算伤害——这一版就是"随机判定胜负"的简化模型。
-        战力 = 武力 + 体力 * 0.5，防守方（原本驻守这一格的一方）站在城池上额外 * 1.3
+        战力 = 武力 * MIGHT_POWER + 体力 * 0.5，
+        防守方（原本驻守这一格的一方）站在城池上额外 * 1.3
         败者掉血并让出这一格：进攻方败则退回冲锋前所在的格子，
         防守方败则被挤到旁边的空格（优先沿冲锋方向继续往外）。
         体力归零则该武将阵亡，格子由胜者占据。
@@ -32,12 +37,12 @@
 ----
 * 鼠标左键：点自己的武将选中 / 点高亮格移动 / 点相邻的敌人格子冲进去交战 / 点侧边栏按钮
 * 空格 或 回车：结束回合
-* R：重新开局（重新读取 map.txt 的固定地图）      ESC：退出
+* R：重新开局（重新读取 map.txt / generals.txt，重新抽将）      ESC：退出
 """
 
 import random
 import sys
-from collections import deque
+from collections import deque, namedtuple
 from pathlib import Path
 
 import pygame
@@ -64,6 +69,13 @@ MOVE_POINTS = 3         # 每回合移动力：最多走 3 格，每次一格（
 REGEN = {OBSTACLE: 0, PLAIN: 8, CITY: 16}
 ASSAULT_COST = 8        # 冲进敌方格子交战的额外体力消耗
 
+# 武力/智力是 1-22 的小刻度，体力却是 0-100，所以武力要乘个系数才和体力同一量级：
+# 乘 4 后，满体力时武力约占战力 6 成，与旧刻度（武力 1-100、系数 1）的手感一致。
+# 若把 MAX_STAT 改成别的上限，MIGHT_POWER 要跟着按比例调（= 4 * 22 / MAX_STAT）。
+MAX_STAT = 22           # generals.txt 里武力/智力的上限（下限 1）
+MIGHT_POWER = 4         # 武力换算到战力刻度的系数
+MIGHT_DAMAGE = 1.4      # 武力对伤害的贡献（= 0.35 * MIGHT_POWER，与旧刻度等值）
+
 P1, P2 = 0, 1
 PLAYER_NAME = {P1: "玩家一（红·蜀）", P2: "玩家二（蓝·魏）"}
 PLAYER_COLOR = {P1: (206, 74, 62), P2: (72, 124, 214)}
@@ -72,19 +84,23 @@ PLAYER_COLOR_DARK = {P1: (128, 42, 36), P2: (40, 74, 136)}
 # 固定地图配置（不做随机生成）
 MAP_FILE = Path(__file__).with_name("map.txt")
 CITY_COUNT = 10                   # map.txt 里应正好有 10 座城池
-MAP_LEGEND = {                    # 配置字符 -> 地形（1/2 是出生点，脚下按通路算）
+MAP_LEGEND = {                    # 配置字符 -> 地形
     ".": PLAIN,
     "#": OBSTACLE,
     "C": CITY,
-    "1": PLAIN,
-    "2": PLAIN,
 }
-MAP_SPAWN = {"1": P1, "2": P2}    # 配置字符 -> 该出生点属于谁
+# 出生点不写进地图：开局时玩家二（魏）占北半场（前 5 行）、玩家一（蜀）占南半场（后 5 行），
+# 各自的武将再从本半场的通路/城池格里随机抽（障碍格不能站人）
+SPAWN_ROWS = {P2: range(0, GRID // 2), P1: range(GRID // 2, GRID)}
 
-NAMES = {
-    P1: ["关羽", "张飞", "赵云"],
-    P2: ["张辽", "许褚", "徐晃"],
-}
+# 武将配置（写在 generals.txt 里；武力/智力是固定值，不随机）
+ROSTER_FILE = Path(__file__).with_name("generals.txt")
+ROSTER_SIZE = 10                  # generals.txt 里每方应有 10 名武将
+DEPLOY_COUNT = 5                  # 开局每方从本方 10 名里随机抽几名上阵
+FACTION_PLAYER = {"蜀": P1, "魏": P2}   # 配置里的阵营 -> 玩家
+
+# 配置里的一名武将：姓名 + 固定武力/智力（体力是每局开始时满值）
+GeneralSpec = namedtuple("GeneralSpec", "name might intellect")
 
 # 配色
 C_BG = (22, 24, 30)
@@ -125,10 +141,18 @@ def get_font(size, bold=False):
 
 
 # --------------------------------------------------------------------------
-# 地图配置
+# 配置文件（map.txt / generals.txt）
 # --------------------------------------------------------------------------
-class MapConfigError(Exception):
-    """map.txt 有问题（行数 / 字符 / 城池数 / 出生点 / 连通性）。"""
+class ConfigError(Exception):
+    """配置文件有问题。"""
+
+
+class MapConfigError(ConfigError):
+    """map.txt 有问题（行数 / 字符 / 城池数 / 连通性 / 半场放不下武将）。"""
+
+
+class RosterConfigError(ConfigError):
+    """generals.txt 有问题（字段数 / 阵营 / 数值范围 / 人数 / 重名）。"""
 
 
 def neighbors(r, c):
@@ -139,21 +163,24 @@ def neighbors(r, c):
             yield nr, nc
 
 
-def parse_map(path):
-    """读取固定地图配置 -> (grid, spawns)；格式不对抛 MapConfigError。"""
+def read_config_lines(path):
+    """读取配置文件：去掉空行和 // 注释行（行内空格制表符保留，由各自的解析器处理）。"""
     try:
         raw = path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
-        raise MapConfigError(f"读不到地图文件 {path}：{exc}") from exc
+        raise ConfigError(f"读不到配置文件 {path}：{exc}") from exc
+    return [(no, text) for no, text in enumerate(raw, 1)
+            if text.strip() and not text.lstrip().startswith("//")]
 
-    # 跳过空行和 // 注释行；行内的空格制表符只是排版用的，全部忽略
-    lines = [(no, "".join(text.split())) for no, text in enumerate(raw, 1)
-             if text.strip() and not text.lstrip().startswith("//")]
+
+def parse_map(path):
+    """读取地图配置 -> grid（纯地形）；格式不对抛 MapConfigError。"""
+    # 行内的空格制表符只是排版用的，全部忽略
+    lines = [(no, "".join(text.split())) for no, text in read_config_lines(path)]
     if len(lines) != GRID:
         raise MapConfigError(f"地图应有 {GRID} 行，实际 {len(lines)} 行。")
 
     grid = [[PLAIN] * GRID for _ in range(GRID)]
-    spawns = {P1: [], P2: []}
     cities = 0
     for r, (no, text) in enumerate(lines):
         if len(text) != GRID:
@@ -166,40 +193,96 @@ def parse_map(path):
             grid[r][c] = MAP_LEGEND[ch]
             if ch == "C":
                 cities += 1
-            elif ch in MAP_SPAWN:
-                spawns[MAP_SPAWN[ch]].append((r, c))
 
     if cities != CITY_COUNT:
         raise MapConfigError(f"地图应有 {CITY_COUNT} 座城池，实际 {cities} 座。")
-    for player in (P1, P2):
-        need = len(NAMES[player])
-        got = len(spawns[player])
-        if got != need:
-            raise MapConfigError(
-                f"{PLAYER_NAME[player]}需要 {need} 个出生点（{'/'.join(MAP_SPAWN)}），实际 {got} 个。")
-    validate_map(grid, spawns)
-    return grid, spawns
+    validate_map(grid)
+    return grid
 
 
-def validate_map(grid, spawns):
-    """所有可通行格必须连成一片，否则双方可能碰不上面。"""
-    walkable = {(r, c) for r in range(GRID) for c in range(GRID)
-                if grid[r][c] != OBSTACLE}
-    origins = spawns[P1] + spawns[P2]
-    seen = {origins[0]}
-    q = deque([origins[0]])
+def walkable_in(grid, rows):
+    """rows 这些行里的可通行格（通路或城池，障碍不能站人）。"""
+    return [(r, c) for r in rows for c in range(GRID) if grid[r][c] != OBSTACLE]
+
+
+def validate_map(grid):
+    """地形本身要能用：所有可通行格连成一片，且每个半场放得下要上阵的武将。"""
+    walkable = walkable_in(grid, range(GRID))
+    if not walkable:
+        raise MapConfigError("地图上一格可通行的地形都没有。")
+
+    seen = {walkable[0]}
+    q = deque([walkable[0]])
     while q:
         r, c = q.popleft()
         for cell in neighbors(r, c):
             if cell in walkable and cell not in seen:
                 seen.add(cell)
                 q.append(cell)
-    unreachable = [p for p in origins if p not in seen]
-    if unreachable:
-        raise MapConfigError(f"地图不连通，这些出生点走不到：{unreachable}。")
-    islands = sorted(walkable - seen)
+    islands = sorted(set(walkable) - seen)
     if islands:
         raise MapConfigError(f"地图有被墙隔开的孤岛格：{islands}。")
+
+    for player in (P1, P2):
+        cells = walkable_in(grid, SPAWN_ROWS[player])
+        if len(cells) < DEPLOY_COUNT:
+            half = "上" if player == P1 else "下"
+            raise MapConfigError(
+                f"{half}半场只有 {len(cells)} 格可通行，"
+                f"放不下 {PLAYER_NAME[player]} 的 {DEPLOY_COUNT} 名武将。")
+
+
+def pick_spawns(grid, rng):
+    """开局时按地形随机分出生点（map.txt 里没有出生点）。
+
+    玩家一从上半场的通路/城池里抽 DEPLOY_COUNT 格、玩家二从下半场抽同样多格，
+    同一方互不重复；每次开局（含按 R 重开）都重新抽，所以同一张地图每局站位都不一样。
+    """
+    return {player: rng.sample(walkable_in(grid, SPAWN_ROWS[player]), DEPLOY_COUNT)
+            for player in (P1, P2)}
+
+
+def parse_roster(path):
+    """读取武将配置 -> {玩家: [GeneralSpec, ...]}；格式不对抛 RosterConfigError。
+
+    每行 4 项：阵营 姓名 武力 智力（例：蜀 关羽 97 76）。只解析，不抽将——
+    哪 5 名上阵由 Game.create_generals 在开局时随机抽。
+    """
+    roster = {P1: [], P2: []}
+    seen_names = {P1: set(), P2: set()}
+    for no, text in read_config_lines(path):
+        parts = text.split()
+        if len(parts) != 4:
+            raise RosterConfigError(
+                f"武将配置第 {no} 行应有 4 项（阵营 姓名 武力 智力），"
+                f"实际 {len(parts)} 项：{text.strip()}")
+        faction, name, *numbers = parts
+        if faction not in FACTION_PLAYER:
+            raise RosterConfigError(
+                f"武将配置第 {no} 行的阵营是 {faction!r}"
+                f"（可用：{' '.join(FACTION_PLAYER)}）。")
+        player = FACTION_PLAYER[faction]
+        stats = []
+        for label, value in zip(("武力", "智力"), numbers):
+            if not value.isdigit() or not 1 <= int(value) <= MAX_STAT:
+                raise RosterConfigError(
+                    f"武将配置第 {no} 行 {name} 的{label}应是 1-{MAX_STAT} 的整数，实际 {value!r}。")
+            stats.append(int(value))
+        if name in seen_names[player]:
+            raise RosterConfigError(
+                f"武将配置第 {no} 行 {name} 在{PLAYER_NAME[player]}里重复了。")
+        seen_names[player].add(name)
+        roster[player].append(GeneralSpec(name, *stats))
+
+    for player in (P1, P2):
+        got = len(roster[player])
+        if got != ROSTER_SIZE:
+            raise RosterConfigError(
+                f"{PLAYER_NAME[player]}应有 {ROSTER_SIZE} 名武将，实际 {got} 名。")
+    if not 1 <= DEPLOY_COUNT <= ROSTER_SIZE:
+        raise RosterConfigError(
+            f"DEPLOY_COUNT 应在 1-{ROSTER_SIZE} 之间，实际 {DEPLOY_COUNT}。")
+    return roster
 
 
 # --------------------------------------------------------------------------
@@ -229,7 +312,8 @@ class General:
 
     @property
     def power(self):
-        return self.might + self.stamina * 0.5
+        # 武力是 1-22 的小刻度，乘 MIGHT_POWER 才和体力项同一量级（见常量区的说明）
+        return self.might * MIGHT_POWER + self.stamina * 0.5
 
     def reset_turn(self):
         self.move_points = MOVE_POINTS
@@ -248,9 +332,12 @@ class Game:
 
     # ---------------- 开局 ----------------
     def new_game(self):
-        self.load_map()                       # 先读地图：配置有问题就不会动到当前对局
+        # 两份配置都先读好、校好，再动对局状态；配置有问题时当前对局原样保留
+        grid = self.load_map()
+        roster = self.load_roster()
+        spawns = pick_spawns(grid, self.rng)   # 出生点不在地图里，开局随机分
+        self.grid, self.roster, self.spawns = grid, roster, spawns
         self.generals = []
-        self.create_generals()
         self.current = P1
         self.turn = 1
         self.selected = None
@@ -260,19 +347,29 @@ class Game:
         self.banner = None                # (文本, 剩余帧数)
         self.winner = None
         self.push_log("新的一局开始，玩家一先行。")
+        self.create_generals()
         self.start_turn(regen=False)
 
     def load_map(self, path=None):
-        """从固定地图配置读取地形和出生点（校验不过抛 MapConfigError）。"""
-        grid, spawns = parse_map(Path(path) if path else MAP_FILE)
-        self.grid = grid
-        self.spawns = spawns
+        """读地图配置 -> grid（校验不过抛 MapConfigError，不碰当前对局）。"""
+        return parse_map(Path(path) if path else MAP_FILE)
+
+    def load_roster(self, path=None):
+        """读武将配置 -> {玩家: [GeneralSpec]}（校验不过抛 RosterConfigError）。"""
+        return parse_roster(Path(path) if path else ROSTER_FILE)
 
     def create_generals(self):
+        """每方从本方 10 名里随机抽 DEPLOY_COUNT 名上阵，落到分好的出生点上。
+
+        抽将和出生点都用 self.rng，所以按 R 重开会重新抽将、重新站位。
+        """
         for player in (P1, P2):
-            for name, (r, c) in zip(NAMES[player], self.spawns[player]):
-                self.generals.append(General(name, self.rng.randint(62, 95),
-                                             self.rng.randint(40, 95), player, r, c))
+            drafted = self.rng.sample(self.roster[player], DEPLOY_COUNT)
+            for spec, (r, c) in zip(drafted, self.spawns[player]):
+                self.generals.append(General(spec.name, spec.might, spec.intellect,
+                                             player, r, c))
+            self.push_log(f"{PLAYER_NAME[player]}上阵："
+                          + "、".join(spec.name for spec in drafted) + "。")
 
     # ---------------- 基础查询 ----------------
     def generals_at(self, r, c):
@@ -398,7 +495,7 @@ class Game:
         roll = self.rng.random()
         winner, loser = (atk, dfd) if roll < p_atk else (dfd, atk)
 
-        base = 26 + winner.might * 0.35 + self.rng.uniform(0, 14)
+        base = 26 + winner.might * MIGHT_DAMAGE + self.rng.uniform(0, 14)
         if terrain == CITY and loser is dfd:
             base *= 0.85                      # 守城减伤
         damage = int(round(base))
@@ -642,7 +739,8 @@ class Game:
         y = self.draw_selected_info(screen, panel, y)
 
         # 底部武将总览（固定在按钮区上方，战报用剩余空间）
-        roster_h = 2 * (18 + 3 * 17) + 8
+        per_side = max(sum(1 for g in self.generals if g.owner == p) for p in (P1, P2))
+        roster_h = 2 * (18 + per_side * 17) + 8
         roster_top = limit - roster_h
         screen.blit(get_font(13, bold=True).render("战报", True, C_TEXT_DIM), (panel.left + 16, y))
         y += 20
@@ -755,25 +853,26 @@ def make_buttons():
 
 
 def restart(game):
-    """重新开局；map.txt 被改坏时保留当前对局，只在界面上提示。"""
+    """重新开局；配置文件被改坏时保留当前对局，只在界面上提示。"""
     try:
         game.new_game()
-    except MapConfigError as exc:
+    except ConfigError as exc:
         game.push_log(f"重开失败：{exc}")
-        game.flash("地图配置有误，重开失败（详见战报）")
+        game.flash("配置有误，重开失败（详见战报）")
 
 
-def show_map_error(exc):
-    """开局就读不到合法地图：开个小窗把原因显示出来，等玩家关掉。"""
+def show_config_error(exc):
+    """开局就读不到合法配置：开个小窗把原因显示出来，等玩家关掉。"""
     pygame.init()
     screen = pygame.display.set_mode((780, 420))
-    pygame.display.set_caption("三国战棋 - 地图配置有误")
+    pygame.display.set_caption("三国战棋 - 配置有误")
     clock = pygame.time.Clock()
     font = get_font(15)
 
-    lines = wrap_text(f"地图配置有误：{exc}", font, 730)
+    lines = wrap_text(f"配置有误：{exc}", font, 730)
     lines += [""]
     lines += wrap_text(f"配置文件：{MAP_FILE}", font, 730)
+    lines += wrap_text(f"          {ROSTER_FILE}", font, 730)
     lines += wrap_text("修好后重新运行程序即可。", font, 730)
 
     waiting = True
@@ -792,11 +891,12 @@ def show_map_error(exc):
 
 def main():
     try:
-        game = Game()                         # 先确认地图配置没问题，再开窗口
-    except MapConfigError as exc:
-        print(f"地图配置有误：{exc}", file=sys.stderr)
+        game = Game()                         # 先确认配置没问题，再开窗口
+    except ConfigError as exc:
+        print(f"配置有误：{exc}", file=sys.stderr)
         print(f"配置文件：{MAP_FILE}", file=sys.stderr)
-        show_map_error(exc)
+        print(f"          {ROSTER_FILE}", file=sys.stderr)
+        show_config_error(exc)
         pygame.quit()
         sys.exit(1)
 
@@ -806,8 +906,6 @@ def main():
     clock = pygame.time.Clock()
 
     buttons = make_buttons()
-    btn_lookup = {key: rect for _label, rect, key in buttons}
-    bottom_top = min(rect.top for _l, rect, _k in buttons)
 
     running = True
     while running:
@@ -835,7 +933,9 @@ def main():
                     restart(game)
                 elif hit_button == "quit":
                     running = False
-                elif my < bottom_top:
+                else:
+                    # 按钮都在右侧面板里（x 远大于棋盘右边界），所以落不到按钮上的点击
+                    # 只要在棋盘矩形内就交给棋盘；别再按 y 去卡，否则最下面几行点不到。
                     board_x, board_y = mx - MARGIN, my - MARGIN
                     if 0 <= board_x < BOARD and 0 <= board_y < BOARD:
                         game.handle_board_click(board_y // CELL, board_x // CELL)
