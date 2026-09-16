@@ -4,9 +4,9 @@
 
 规则概要
 --------
-* 地图 10x10，每格一种地形：障碍(不可通行) / 通路 / 城池(可通行，防御 +30%，驻守回血更多)
+* 地图 10x10，每格一种地形：障碍(不可通行) / 通路 / 城池(可通行，驻守回血更多)
   地形用整数枚举定义，以后想加第 4 种（如"树林"）只需在 TERRAIN_* 后面追加并把
-  TERRAIN_NAME / TERRAIN_COLOR / REGEN 里补一条即可。
+  TERRAIN_NAME / REGEN 里补一条即可。
 * 地图不做随机生成，固定写在与本文件同目录的 map.txt 里：10 行 x 10 列、正好 10 座城池。
   map.txt 只画地形，不再标出生点；开局时每方上阵的武将随机落在自己半场的通路或城池上
   （玩家二（魏）在北、玩家一（蜀）在南，两半场分界由 warlords.py 的 SPAWN_ROWS 决定）。
@@ -14,9 +14,9 @@
 * 武将写在同目录的 generals.txt 里，魏蜀各 10 名（武力/智力都是固定值）：每局开局时
   每方从本方 10 名里随机抽 5 名上阵，抽中的武将再随机落到本方半场。改完按 R 即可重开。
 * 每名武将的属性（都在 generals.txt 里配置）：
-    - 武力 might     ：固定值，1-MAX_STAT，决定战斗判定权重和伤害
+    - 武力 might     ：固定值，1-MAX_STAT，决定交战每回合掉多少体力（掉血只看对方武力）
     - 智力 intellect ：固定值，1-MAX_STAT，目前只作展示，不参与计算
-    - 体力 stamina   ：可变值，上限 100。只有战斗会消耗体力；
+    - 体力 stamina   ：可变值，上限 100。只有交战会消耗体力；
                        每回合开始时按所在地形恢复（通路 +8 / 城池 +16）
 * 移动：每名武将有 MOVE_POINTS 点移动力，回合开始时重置为 3，每挪到相邻一格花 1 点，
         所以一回合最多走 3 格。移动力与体力完全脱钩：移动不消耗体力，
@@ -25,19 +25,22 @@
         移动力花完了本回合才动不了。
 * 交战：把己方武将的移动目标点成"相邻的敌方武将格子"（踏进去）即触发交战，消耗 1 点移动力。
         必须从相邻格踏入，不能隔着格子冲锋。
-        先按双方战力加权随机判定胜负，再结算伤害——这一版就是"随机判定胜负"的简化模型。
-        战力 = 武力 * MIGHT_POWER + 体力 * 0.5，
-        防守方（原本驻守这一格的一方）站在城池上额外 * 1.3
-        败者掉血并让出这一格：进攻方败则退回冲锋前所在的格子，
-        防守方败则被挤到旁边的空格（优先沿冲锋方向继续往外）。
-        体力归零则该武将阵亡，格子由胜者占据。
+        交战时切到**单独的一屏**（Battle），打一场至少 1 回合、可主动撤退的单挑：
+          - 每回合双方同时掉体力，掉多少只看对方武力，取 [1, 2*对方武力] 里的随机整数；
+          - 每回合结束时双方都能选择撤退，由攻方先选，撤退的一方算败方；
+          - 体力掉到 0 或以下即阵亡，同样算败方，也可能双方同归于尽。
+        打完时双方剩多少体力，就是这场交战的伤害结算结果（不再有额外的伤害公式）；
+        战果落回地图：败方让出这一格（攻方败则原地不动），阵亡的从棋盘上移除。
 * 胜负：一方武将全灭即败；回合数达到上限时按 存活武将*100 + 总体力 + 占据城池*50 比总分。
 
 操作
 ----
-* 鼠标左键：点自己的武将选中 / 点高亮格移动 / 点相邻的敌人格子冲进去交战 / 点侧边栏按钮
+* 鼠标左键：点自己的武将选中 / 点高亮格移动 / 点相邻的敌人格子发动进攻 / 点侧边栏按钮
 * 空格 或 回车：结束回合
 * R：重新开局（重新读取 map.txt / generals.txt，重新抽将）      ESC：退出
+* 交战界面（单独一屏，键盘鼠标都归它管；战斗中 ESC / R 故意不生效）：
+    鼠标点按钮交手 / 继续缠斗 / 撤退 / 返回战场；
+    空格、回车 = 第一个按钮（不会误触"撤退"）；滚轮、↑↓、PageUp/PageDown 翻看战斗过程。
 """
 
 import random
@@ -67,14 +70,13 @@ TURN_LIMIT = 40         # 总回合数上限（双方各行动一次算 2 回合
 MAX_STAMINA = 100
 MOVE_POINTS = 3         # 每回合移动力：最多走 3 格，每次一格（与体力无关）
 REGEN = {OBSTACLE: 0, PLAIN: 8, CITY: 16}
-ASSAULT_COST = 8        # 冲进敌方格子交战的额外体力消耗
 
-# 武力/智力是 1-22 的小刻度，体力却是 0-100，所以武力要乘个系数才和体力同一量级：
-# 乘 4 后，满体力时武力约占战力 6 成，与旧刻度（武力 1-100、系数 1）的手感一致。
-# 若把 MAX_STAT 改成别的上限，MIGHT_POWER 要跟着按比例调（= 4 * 22 / MAX_STAT）。
 MAX_STAT = 22           # generals.txt 里武力/智力的上限（下限 1）
-MIGHT_POWER = 4         # 武力换算到战力刻度的系数
-MIGHT_DAMAGE = 1.4      # 武力对伤害的贡献（= 0.35 * MIGHT_POWER，与旧刻度等值）
+
+# 交战时每回合掉的体力：只看**对方**武力，取闭区间 [1, LOSS_MAX_PER_MIGHT * 对方武力]
+# 里的一个随机整数。武力上限 22 -> 单回合最多掉 44 点，所以体力 100 的武将大约 3-6 回合
+# 就会见底；又因为双方每回合至少掉 1 点，单挑最迟 100 回合内必定分出结果，不会无限拖下去。
+LOSS_MAX_PER_MIGHT = 2
 
 P1, P2 = 0, 1
 PLAYER_NAME = {P1: "玩家一（红·蜀）", P2: "玩家二（蓝·魏）"}
@@ -118,6 +120,8 @@ C_SELECT = (255, 236, 150)
 C_ATTACK = (255, 96, 82)
 C_BTN = (52, 57, 70)
 C_BTN_HOVER = (74, 82, 100)
+C_GOLD = (198, 168, 96)          # 交战界面：主要按钮 / 结算文字
+C_WARN = (206, 106, 92)          # 交战界面：撤退按钮 / 阵亡
 
 _font_cache = {}
 
@@ -310,11 +314,6 @@ class General:
         """本回合移动力已用尽，不能再走也不能交战。"""
         return self.move_points <= 0
 
-    @property
-    def power(self):
-        # 武力是 1-22 的小刻度，乘 MIGHT_POWER 才和体力项同一量级（见常量区的说明）
-        return self.might * MIGHT_POWER + self.stamina * 0.5
-
     def reset_turn(self):
         self.move_points = MOVE_POINTS
 
@@ -346,6 +345,7 @@ class Game:
         self.log = []
         self.banner = None                # (文本, 剩余帧数)
         self.winner = None
+        self.battle = None                # 正在进行的交战（Battle），非 None 时是交战界面
         self.push_log("新的一局开始，玩家一先行。")
         self.create_generals()
         self.start_turn(regen=False)
@@ -462,68 +462,28 @@ class Game:
 
     # ---------------- 战斗 ----------------
     def charge(self, attacker, defender):
-        """从相邻格踏进敌方武将所在的格子，触发交战。
+        """从相邻格向敌方武将发动进攻：花 1 点移动力，然后切到交战界面打一场单挑。
 
-        消耗 1 点移动力 + 一次突击体力；交战不结束该武将的行动，
-        只要还有移动力就能接着走或者接着撞下一个人。
+        真正的胜负判定与伤害结算都在 Battle 那一屏上完成（结算结果直接体现在双方体力上），
+        打完由 end_battle 回到地图。交战不结束该武将的行动：只要还有移动力，
+        就能接着走、接着撞下一个人。进攻方在交战期间不动窝——败了就是白花一点移动力。
         """
-        origin = attacker.pos
-        terrain = self.grid[defender.row][defender.col]
-        attacker.row, attacker.col = defender.pos       # 先踏进对方格子
         attacker.move_points = max(0, attacker.move_points - 1)
-        attacker.add_stamina(-ASSAULT_COST)
+        self.clear_selection()                    # 交战期间棋盘不响应操作
+        self.battle = Battle(self, attacker, defender)
+        row, col = self.battle.cell
+        self.push_log(f"⚔ {attacker.name} 进攻 {defender.name}"
+                      f"（{TERRAIN_NAME[self.battle.terrain]}({row},{col})）。")
 
-        self.resolve_battle(attacker, defender, origin, terrain)
-
-        if attacker.alive:
-            if attacker.exhausted:
-                self.clear_selection()
-            else:
-                self.select(attacker)                   # 还有移动力就继续行动
-        else:
-            self.clear_selection()
+    def end_battle(self):
+        """关掉交战界面，回到地图：让进攻方接着行动（前提是他还活着、还有移动力）。"""
+        attacker = self.battle.atk
+        self.battle = None
         self.check_victory()
-
-    def resolve_battle(self, atk, dfd, origin, terrain):
-        """atk 已踏进 dfd 的格子；origin 是冲锋前所在的格子，terrain 是交战格地形。"""
-        atk_power = atk.power
-        dfd_power = dfd.power
-        if terrain == CITY:
-            dfd_power *= 1.3                  # 城池防御加成（守方是原本驻守这一格的人）
-        total = atk_power + dfd_power
-        p_atk = atk_power / total if total > 0 else 0.5
-        roll = self.rng.random()
-        winner, loser = (atk, dfd) if roll < p_atk else (dfd, atk)
-
-        base = 26 + winner.might * MIGHT_DAMAGE + self.rng.uniform(0, 14)
-        if terrain == CITY and loser is dfd:
-            base *= 0.85                      # 守城减伤
-        damage = int(round(base))
-        loser.add_stamina(-damage)
-        winner.add_stamina(-int(damage * 0.25))   # 胜者也有损耗
-
-        self.push_log(f"⚔ {atk.name} 踏进 {dfd.name} 的格子（胜率 {p_atk:.0%}）："
-                      f"{winner.name} 胜，{loser.name} 损失 {damage} 体力。")
-        self.flash(f"{winner.name} 击败 {loser.name}！(-{damage} 体力)")
-
-        for gen in (loser, winner):
-            if gen.alive and gen.stamina <= 0:
-                gen.alive = False
-                self.push_log(f"☠ {gen.name} 体力耗尽，阵亡！")
-
-        if not winner.alive or not loser.alive:
-            return                            # 格子归还活着的那一方，无需再挪
-        if loser is atk:
-            self.retreat(atk, origin)         # 进攻方败：退回冲锋前所在的格子
-        elif not self.dislodge(dfd, origin):
-            self.retreat(atk, origin)         # 防守方败却无处可挪：胜者也不进占
-
-    def retreat(self, gen, cell):
-        """把 gen 挪回 cell（冲锋前的出发格，此时必定空着）；万一被占就就近找个空位。"""
-        if self.free_for(gen, *cell):
-            gen.row, gen.col = cell
-            return True
-        return self.dislodge(gen, cell)
+        if self.winner is not None or not attacker.alive or attacker.exhausted:
+            self.clear_selection()
+        else:
+            self.select(attacker)                 # 还有移动力就继续行动
 
     def dislodge(self, gen, origin):
         """把 gen 挤到旁边的空格：优先沿冲锋方向继续往外，再退回其它方向。"""
@@ -822,6 +782,402 @@ class Game:
         return y + 8
 
 
+# --------------------------------------------------------------------------
+# 交战界面（单独的一屏）
+# --------------------------------------------------------------------------
+class Battle:
+    """一次交战的独立界面：双方在这里打一场至少 1 回合、可以主动撤退的单挑。
+
+    规则（胜负判定 + 伤害结算都在这屏上完成）
+    ------------------------------------------
+    * 每回合双方**同时**掉体力，掉多少只看**对方**武力：取闭区间
+      [1, LOSS_MAX_PER_MIGHT * 对方武力] 里的一个随机整数（默认就是 2 倍对方武力）。
+      武力高的武将打得疼，也扛得住——因为对方的武力决定了"打他多重"。
+    * 每回合结束时双方都可以选择撤退，由**攻方先选**；撤退的一方算败方。
+      两边都选继续就进下一回合，所以撤退至少要等第 1 回合打完才能选（交战至少 1 回合）。
+    * 体力掉到 0 或以下即阵亡，同样算败方；双方同一回合都掉到 0 就是同归于尽（平局）。
+    * 打完时双方剩多少体力，就是这场交战的伤害结算结果——不再有额外的伤害公式，
+      战果（谁占这一格）由 apply() 落回地图。
+
+    状态流转
+    --------
+        READY --交手--> IMPACT --掉血动画放完--> 有人阵亡？ --> OVER
+                                              \\--> 都还活着 --> CHOOSE_ATK
+        CHOOSE_ATK --继续--> CHOOSE_DFD --继续--> 下一回合的 READY
+        CHOOSE_ATK / CHOOSE_DFD --撤退--> OVER --返回战场--> 回到地图
+    """
+
+    READY, IMPACT, CHOOSE_ATK, CHOOSE_DFD, OVER = range(5)
+    IMPACT_FRAMES = 42                     # 掉血动画时长（帧，60fps 约 0.7 秒）
+    SHAKE = (0, -4, 3, -3, 2, -2, 1, 0)    # 掉血瞬间卡片的抖动偏移
+    HIST_ROWS = 5                          # 战斗过程一屏显示几回合（多出来的可以翻）
+
+    # 一整屏的版面（屏幕尺寸由主循环的 WIN_W x WIN_H 决定）
+    CARD_W, CARD_H, CARD_Y = 420, 246, 86
+    CARD_X = (40, WIN_W - 40 - CARD_W)
+    BTN_W, BTN_H, BTN_Y = 220, 52, 412
+    HIST_RECT = pygame.Rect(40, 476, WIN_W - 80, 166)
+    HINT_Y, FOOT_Y = 348, 654
+
+    def __init__(self, game, attacker, defender):
+        self.game = game
+        self.rng = game.rng
+        self.atk = attacker
+        self.dfd = defender
+        self.cell = defender.pos              # 争夺中的格子（守方原本站的地方）
+        self.origin = attacker.pos            # 攻方的出发格（攻方败了原地不动）
+        self.terrain = game.grid[self.cell[0]][self.cell[1]]
+        self.round = 0
+        self.rounds = []                      # 每回合一条战报，见 roll()
+        self.scroll = 0                       # 战斗过程往上翻了几回合（0 = 贴着最新一条）
+        self.state = self.READY
+        self.timer = 0
+        self.outcome = None                   # "atk" 攻方胜 / "dfd" 守方胜 / "draw" 同归于尽
+        self.ending = ""
+        self.hint = (f"两军在 {TERRAIN_NAME[self.terrain]}"
+                     f"({self.cell[0]},{self.cell[1]}) 列阵，准备交手。")
+
+    # ---------------- 规则 ----------------
+    def foe_of(self, gen):
+        """gen 的对手。"""
+        return self.dfd if gen is self.atk else self.atk
+
+    def loss_range(self, victim):
+        """victim 这一回合最多掉多少体力 = LOSS_MAX_PER_MIGHT * 对方武力。"""
+        return LOSS_MAX_PER_MIGHT * self.foe_of(victim).might
+
+    @property
+    def chooser(self):
+        """现在该谁做决定（继续 / 撤退）；没人要做决定时是 None。"""
+        if self.state == self.CHOOSE_ATK:
+            return self.atk
+        if self.state == self.CHOOSE_DFD:
+            return self.dfd
+        return None
+
+    @property
+    def shown_round(self):
+        """界面上该显示的回合数：READY 时是即将开打的这一回合。"""
+        return self.round + 1 if self.state == self.READY else self.round
+
+    def roll(self):
+        """交手一回合：双方同时按对方武力掉体力（各取一个 [1, 2*对方武力] 的随机数）。"""
+        if self.state != self.READY:
+            return
+        self.round += 1
+        atk_loss = self.rng.randint(1, self.loss_range(self.atk))
+        dfd_loss = self.rng.randint(1, self.loss_range(self.dfd))
+        self.atk.add_stamina(-atk_loss)
+        self.dfd.add_stamina(-dfd_loss)
+        for gen in (self.atk, self.dfd):
+            if gen.stamina <= 0:
+                gen.alive = False             # 掉到 0 或以下当场阵亡
+        self.rounds.append({"no": self.round, "atk_loss": atk_loss, "dfd_loss": dfd_loss,
+                            "atk_hp": self.atk.stamina, "dfd_hp": self.dfd.stamina})
+        self.hint = (f"第 {self.round} 回合：{self.atk.name} 掉 {atk_loss} 点体力，"
+                     f"{self.dfd.name} 掉 {dfd_loss} 点体力。")
+        self.state, self.timer = self.IMPACT, self.IMPACT_FRAMES
+
+    def update(self):
+        """掉血动画放完后决定下一步：有人阵亡就收场，否则交给双方做选择。"""
+        if self.state != self.IMPACT:
+            return
+        self.timer -= 1
+        if self.timer > 0:
+            return
+        if not self.atk.alive and not self.dfd.alive:
+            self.finish("draw", f"{self.atk.name} 与 {self.dfd.name} 同归于尽，双双阵亡。")
+        elif not self.atk.alive:
+            self.finish("dfd", f"{self.atk.name} 力竭阵亡，{self.dfd.name} 守住了阵脚。")
+        elif not self.dfd.alive:
+            self.finish("atk", f"{self.dfd.name} 力竭阵亡，{self.atk.name} 获胜。")
+        else:
+            self.state = self.CHOOSE_ATK
+            self.hint = (f"第 {self.round} 回合结束，{self.atk.name}（攻方）先决定："
+                         f"继续缠斗，还是就此撤退？")
+
+    def continue_fight(self):
+        """选择继续：攻方选完轮到守方，两边都选继续就打下一回合。"""
+        if self.state == self.CHOOSE_ATK:
+            self.state = self.CHOOSE_DFD
+            self.hint = (f"{self.atk.name} 继续缠斗，现在轮到 {self.dfd.name}（守方）"
+                         f"决定：接着打，还是撤退？")
+        elif self.state == self.CHOOSE_DFD:
+            self.state = self.READY
+            self.hint = f"双方各自重整旗鼓，第 {self.round + 1} 回合准备交手。"
+
+    def retreat(self, gen):
+        """选择撤退：退的一方算败方，交战立刻结束。"""
+        if self.state not in (self.CHOOSE_ATK, self.CHOOSE_DFD):
+            return
+        if gen is self.atk:
+            self.finish("dfd", f"{self.atk.name} 撤退，判为败方；{self.dfd.name} 获胜。")
+        else:
+            self.finish("atk", f"{self.dfd.name} 撤退，判为败方；{self.atk.name} 获胜。")
+
+    def finish(self, outcome, text):
+        """定下胜负，并把战果落回地图。"""
+        self.outcome, self.ending, self.state = outcome, text, self.OVER
+        self.hint = text
+        self.apply()
+
+    def apply(self):
+        """战果落回地图：战报 + 格子归属。
+
+        * 攻方胜：守方（还活着的话）撤到旁边的空格，攻方进占这一格；
+          守方撤退却无处可挪时，攻方也不进占（沿用旧规则，避免把人挤掉）。
+        * 守方胜：攻方原地不动，守方守住这一格。
+        * 同归于尽：两边都从棋盘上消失，格子空着。
+        """
+        game, atk, dfd = self.game, self.atk, self.dfd
+        game.push_log(f"⚔ {atk.name} vs {dfd.name} 共 {self.round} 回合：{self.ending}")
+        for gen in (atk, dfd):
+            if not gen.alive:
+                game.push_log(f"☠ {gen.name} 体力耗尽，阵亡！")
+        if self.outcome != "atk":
+            return
+        if dfd.alive and not game.dislodge(dfd, self.origin):
+            game.push_log(f"{dfd.name} 想撤却没有空位，{atk.name} 也未能进占，双方各自在原地。")
+        else:
+            atk.row, atk.col = self.cell
+            game.push_log(f"{atk.name} 进占 ({self.cell[0]},{self.cell[1]})。")
+
+    # ---------------- 操作 ----------------
+    def button_rect(self, index, count):
+        """第 index 个按钮（一行 count 个，整体居中）。"""
+        gap = 24
+        total = count * self.BTN_W + (count - 1) * gap
+        left = (WIN_W - total) // 2 + index * (self.BTN_W + gap)
+        return pygame.Rect(left, self.BTN_Y, self.BTN_W, self.BTN_H)
+
+    def buttons(self):
+        """当前状态下可点的按钮 -> [(文字, Rect, 动作)]。"""
+        if self.state == self.READY:
+            return [("交手", self.button_rect(0, 1), "roll")]
+        if self.state in (self.CHOOSE_ATK, self.CHOOSE_DFD):
+            who = "atk_retreat" if self.state == self.CHOOSE_ATK else "dfd_retreat"
+            return [("继续缠斗", self.button_rect(0, 2), "hold"),
+                    ("撤退（判负）", self.button_rect(1, 2), who)]
+        if self.state == self.OVER:
+            return [("返回战场", self.button_rect(0, 1), "close")]
+        return []                             # IMPACT：掉血动画中，不接受操作
+
+    def act(self, action):
+        if action == "roll":
+            self.roll()
+        elif action == "hold":
+            self.continue_fight()
+        elif action == "atk_retreat":
+            self.retreat(self.atk)
+        elif action == "dfd_retreat":
+            self.retreat(self.dfd)
+        elif action == "close":
+            self.game.end_battle()
+
+    def handle_click(self, pos):
+        for _label, rect, action in self.buttons():
+            if rect.collidepoint(pos):
+                self.act(action)
+                return
+
+    def scroll_history(self, steps):
+        """往上翻 / 往下翻战斗过程（滚轮一次几行、方向键一行）。"""
+        self.scroll = max(0, min(self.max_scroll, self.scroll + steps))
+
+    @property
+    def max_scroll(self):
+        return max(0, len(self.rounds) - self.HIST_ROWS)
+
+    def primary(self):
+        """空格 / 回车：走第一个按钮（继续缠斗 / 交手 / 返回战场），不会误触撤退。"""
+        buttons = self.buttons()
+        if buttons:
+            self.act(buttons[0][2])
+
+    # ---------------- 绘制 ----------------
+    def card_rect(self, gen):
+        return pygame.Rect(self.CARD_X[0 if gen is self.atk else 1],
+                           self.CARD_Y, self.CARD_W, self.CARD_H)
+
+    def draw(self, screen, mouse_pos):
+        screen.fill(C_BG)
+        self.draw_header(screen)
+        self.draw_card(screen, self.atk, "攻方")
+        self.draw_card(screen, self.dfd, "守方")
+        self.draw_vs(screen)
+        self.draw_history(screen)
+        self.draw_controls(screen, mouse_pos)
+
+    def draw_header(self, screen):
+        title = get_font(26, bold=True).render("交战", True, C_TEXT)
+        screen.blit(title, title.get_rect(midtop=(WIN_W // 2, 16)))
+        sub = (f"{self.atk.name}（{PLAYER_NAME[self.atk.owner]}）进攻 "
+               f"{self.dfd.name}（{PLAYER_NAME[self.dfd.owner]}）驻守的 "
+               f"{TERRAIN_NAME[self.terrain]} ({self.cell[0]},{self.cell[1]})")
+        surf = get_font(14).render(sub, True, C_TEXT_DIM)
+        screen.blit(surf, surf.get_rect(midtop=(WIN_W // 2, 52)))
+
+    def draw_vs(self, screen):
+        cx = (self.CARD_X[0] + self.CARD_W + self.CARD_X[1]) // 2
+        vs = get_font(30, bold=True).render("VS", True, (108, 116, 136))
+        screen.blit(vs, vs.get_rect(center=(cx, self.CARD_Y + 56)))
+        rnd = get_font(18, bold=True).render(f"第 {self.shown_round} 回合", True, C_TEXT)
+        screen.blit(rnd, rnd.get_rect(center=(cx, self.CARD_Y + 100)))
+
+    def card_frames(self, gen):
+        """(没被抖动的卡片矩形, 掉血进度 0->1)——不在掉血动画中时进度是 None。"""
+        rect = self.card_rect(gen)
+        if self.state != self.IMPACT or not self.rounds:
+            return rect, None
+        progress = 1 - self.timer / self.IMPACT_FRAMES
+        if self.timer > self.IMPACT_FRAMES - len(self.SHAKE):
+            rect = rect.move(self.SHAKE[self.IMPACT_FRAMES - self.timer], 0)
+        return rect, progress
+
+    def draw_card(self, screen, gen, side_label):
+        rect, progress = self.card_frames(gen)
+        other = self.foe_of(gen)
+        color = PLAYER_COLOR[gen.owner]
+        pygame.draw.rect(screen, C_PANEL, rect, border_radius=12)
+
+        # 顶栏：攻方/守方 + 站位
+        tag = get_font(14, bold=True).render(side_label, True, color)
+        screen.blit(tag, (rect.left + 16, rect.top + 12))
+        where = (f"从 ({self.origin[0]},{self.origin[1]}) 进攻" if gen is self.atk else
+                 f"驻守 {TERRAIN_NAME[self.terrain]} ({self.cell[0]},{self.cell[1]})")
+        info = get_font(12).render(where, True, C_TEXT_DIM)
+        screen.blit(info, info.get_rect(midright=(rect.right - 16, rect.top + 20)))
+
+        # 姓名 + 属性
+        screen.blit(get_font(26, bold=True).render(gen.name, True, C_TEXT),
+                    (rect.left + 16, rect.top + 42))
+        screen.blit(get_font(14).render(
+            f"武力 {gen.might}    智力 {gen.intellect}    {PLAYER_NAME[gen.owner]}",
+            True, C_TEXT_DIM), (rect.left + 16, rect.top + 80))
+
+        # 体力条 + 本回合的掉血范围
+        self.draw_stamina_bar(screen, gen, pygame.Rect(rect.left + 16, rect.top + 116,
+                                                       rect.width - 32, 30))
+        screen.blit(get_font(13).render(
+            f"每回合掉 1 ~ {self.loss_range(gen)} 点体力"
+            f"（对方武力 {other.might} × {LOSS_MAX_PER_MIGHT}）", True, C_TEXT_DIM),
+            (rect.left + 16, rect.top + 158))
+
+        # 状态提示
+        if not gen.alive:
+            note, note_color = "阵亡", C_WARN
+        elif self.chooser is gen:
+            note, note_color = "该你决定（继续 / 撤退）", C_SELECT
+        else:
+            note, note_color = "", C_TEXT_DIM
+        if note:
+            screen.blit(get_font(16, bold=True).render(note, True, note_color),
+                        (rect.left + 16, rect.top + 186))
+
+        # 掉血动画：卡片泛红 + 上浮的掉血数字
+        if progress is not None:
+            flash = pygame.Surface(rect.size, pygame.SRCALPHA)
+            flash.fill((226, 84, 72, int(90 * max(0.0, 1 - progress * 2))))
+            screen.blit(flash, rect.topleft)
+            self.draw_loss_popup(screen, gen, rect, progress)
+
+        if not gen.alive:
+            veil = pygame.Surface(rect.size, pygame.SRCALPHA)
+            veil.fill((10, 10, 14, 170))
+            screen.blit(veil, rect.topleft)
+            big = get_font(34, bold=True).render("阵亡", True, C_WARN)
+            screen.blit(big, big.get_rect(center=rect.center))
+
+        pygame.draw.rect(screen, color if gen.alive else (110, 110, 120),
+                         rect, 3, border_radius=12)
+
+    def draw_loss_popup(self, screen, gen, rect, progress):
+        record = self.rounds[-1]
+        loss = record["atk_loss"] if gen is self.atk else record["dfd_loss"]
+        alpha = 255 if progress < 0.55 else max(0, int(255 * (1 - progress) / 0.45))
+        pos = pygame.Rect(0, 0, 0, 0)
+        pos.center = (rect.centerx, rect.centery - 24 - int(26 * progress))
+        for dx, dy, col in ((2, 2, (40, 20, 16)), (0, 0, (255, 226, 150))):
+            surf = get_font(46, bold=True).render(f"-{loss}", True, col)
+            surf.set_alpha(alpha)
+            screen.blit(surf, surf.get_rect(center=(pos.centerx + dx, pos.centery + dy)))
+
+    def draw_stamina_bar(self, screen, gen, bar):
+        pygame.draw.rect(screen, (20, 20, 26), bar, border_radius=6)
+        ratio = max(0.0, min(1.0, gen.stamina / gen.max_stamina))
+        fill = bar.copy()
+        fill.width = max(1, int(bar.width * ratio))
+        color = ((96, 208, 112) if ratio > 0.5 else
+                 (232, 196, 72) if ratio > 0.25 else (226, 84, 72))
+        pygame.draw.rect(screen, color, fill, border_radius=6)
+        pygame.draw.rect(screen, (86, 94, 112), bar, 1, border_radius=6)
+        txt = get_font(15, bold=True).render(
+            f"体力 {gen.stamina} / {gen.max_stamina}", True, (245, 245, 245))
+        screen.blit(txt, txt.get_rect(center=bar.center))
+
+    def draw_history(self, screen):
+        rect = self.HIST_RECT
+        pygame.draw.rect(screen, C_PANEL, rect, border_radius=10)
+        pygame.draw.rect(screen, (52, 57, 70), rect, 1, border_radius=10)
+        total = len(self.rounds)
+        title = f"战斗过程（共 {total} 回合）" if total else "战斗过程"
+        screen.blit(get_font(14, bold=True).render(title, True, C_TEXT_DIM),
+                    (rect.left + 16, rect.top + 10))
+        if not total:
+            screen.blit(get_font(13).render("尚未交手。", True, C_TEXT_DIM),
+                        (rect.left + 16, rect.top + 40))
+            return
+
+        end = total - self.scroll                        # 显示第 ... 到第 end 回合
+        shown = self.rounds[max(0, end - self.HIST_ROWS):end]
+        if total > self.HIST_ROWS:
+            tip = f"显示第 {shown[0]['no']}-{shown[-1]['no']} 回合 · 滚轮 / ↑↓ 翻看"
+            tip_surf = get_font(12).render(tip, True, C_TEXT_DIM)
+            screen.blit(tip_surf, tip_surf.get_rect(midright=(rect.right - 16, rect.top + 18)))
+
+        font = get_font(14)
+        x_round = rect.left + 16
+        x_atk = x_round + 104
+        x_dfd = x_atk + (rect.right - 16 - x_atk) // 2
+        y = rect.top + 38
+        for record in shown:
+            screen.blit(font.render(f"第 {record['no']} 回合", True, C_TEXT_DIM), (x_round, y))
+            for gen, x in ((self.atk, x_atk), (self.dfd, x_dfd)):
+                loss, hp = ((record["atk_loss"], record["atk_hp"]) if gen is self.atk else
+                            (record["dfd_loss"], record["dfd_hp"]))
+                text = f"{gen.name}  -{loss}  体力剩 {hp}"
+                if hp <= 0:
+                    text += "  阵亡"
+                screen.blit(font.render(text, True, PLAYER_COLOR[gen.owner]), (x, y))
+            y += 22
+
+    def draw_controls(self, screen, mouse_pos):
+        font = get_font(17, bold=True)
+        color = (255, 236, 160) if self.state == self.OVER else C_TEXT
+        y = self.HINT_Y
+        for line in wrap_text(self.hint, font, WIN_W - 120)[:2]:
+            surf = font.render(line, True, color)
+            screen.blit(surf, surf.get_rect(center=(WIN_W // 2, y)))
+            y += 26
+        for label, rect, action in self.buttons():
+            hover = rect.collidepoint(mouse_pos)
+            pygame.draw.rect(screen, C_BTN_HOVER if hover else C_BTN, rect, border_radius=10)
+            pygame.draw.rect(screen, self.button_accent(action), rect, 2, border_radius=10)
+            txt = get_font(16, bold=True).render(label, True, C_TEXT)
+            screen.blit(txt, txt.get_rect(center=rect.center))
+        foot = get_font(12).render(
+            "空格 / 回车 = 第一个按钮（交手、继续缠斗、返回战场）  ·  撤退请点按钮"
+            "  ·  滚轮 / ↑↓ 翻看战斗过程  ·  战斗中 ESC / R 不生效", True, C_TEXT_DIM)
+        screen.blit(foot, foot.get_rect(center=(WIN_W // 2, self.FOOT_Y)))
+
+    def button_accent(self, action):
+        if action in ("atk_retreat", "dfd_retreat"):
+            return C_WARN
+        if action == "roll":
+            return C_GOLD
+        return (86, 94, 112)
+
+
 def wrap_text(text, font, max_width):
     """按像素宽度粗略折行（中文逐字）。"""
     lines, cur = [], ""
@@ -913,6 +1269,24 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif game.battle is not None:
+                # 交战界面是单独的一屏：键盘鼠标都归它管。ESC / R 在这里故意不生效，
+                # 免得打到一半误触把这一局丢了（关窗口仍然可以退出）。
+                key = event.key if event.type == pygame.KEYDOWN else None
+                if key in (pygame.K_SPACE, pygame.K_RETURN):
+                    game.battle.primary()
+                elif key == pygame.K_UP:
+                    game.battle.scroll_history(1)
+                elif key == pygame.K_DOWN:
+                    game.battle.scroll_history(-1)
+                elif key == pygame.K_PAGEUP:
+                    game.battle.scroll_history(game.battle.HIST_ROWS)
+                elif key == pygame.K_PAGEDOWN:
+                    game.battle.scroll_history(-game.battle.HIST_ROWS)
+                elif event.type == pygame.MOUSEWHEEL:
+                    game.battle.scroll_history(event.y)
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    game.battle.handle_click(event.pos)
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
@@ -940,8 +1314,13 @@ def main():
                     if 0 <= board_x < BOARD and 0 <= board_y < BOARD:
                         game.handle_board_click(board_y // CELL, board_x // CELL)
 
-        game.tick()
-        game.draw(screen, mouse_pos, buttons)
+        battle = game.battle
+        if battle is not None:
+            battle.update()                       # 掉血动画放完后自动进入下一步
+            battle.draw(screen, mouse_pos)
+        else:
+            game.tick()
+            game.draw(screen, mouse_pos, buttons)
         pygame.display.flip()
         clock.tick(FPS)
 
