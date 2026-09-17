@@ -8,9 +8,12 @@
   地形用整数枚举定义，以后想加第 4 种（如"树林"）只需在 TERRAIN_* 后面追加并把
   TERRAIN_NAME / REGEN 里补一条即可。
 * 地图不做随机生成，固定写在与本文件同目录的 map.txt 里：10 行 x 10 列、正好 10 座城池。
-  map.txt 只画地形，不再标出生点；开局时每方上阵的武将随机落在自己半场的通路或城池上
+  每一格写成「地形:地名」（如 .:樊城 / C:襄阳），障碍格只写 #——地形和地名在同一个文件里，
+  不再分两个文件，也就不存在"两份配置对不上"这回事；出生点不写进地图，
+  开局时每方上阵的武将随机落在自己半场的通路或城池上
   （玩家二（魏）在北、玩家一（蜀）在南，两半场分界由 warlords.py 的 SPAWN_ROWS 决定）。
-  改完地图保存后，在游戏里按 R 即可按新地图重开。
+  地图上每格底部会写出地名，鼠标悬停还会弹出「地名（地形）」，
+  选中武将和交战界面也都会写明所在地。改完地图保存后，在游戏里按 R 即可按新地图重开。
 * 武将写在同目录的 generals.txt 里，魏蜀各 10 名（武力/智力都是固定值）：每局开局时
   每方从本方 10 名里随机抽 5 名上阵，抽中的武将再随机落到本方半场。改完按 R 即可重开。
 * 每名武将的属性（都在 generals.txt 里配置）：
@@ -35,7 +38,9 @@
 
 操作
 ----
-* 鼠标左键：点自己的武将选中 / 点高亮格移动 / 点相邻的敌人格子发动进攻 / 点侧边栏按钮
+* 鼠标左键：点高亮格移动（走到那儿，己方已经站了一人也照样能走过去）/
+  点自己的武将换选（同一格有两人就轮着选，轮完再点一下取消选中）/
+  点相邻的敌人格子发动进攻 / 点侧边栏按钮
 * 空格 或 回车：结束回合
 * R：重新开局（重新读取 map.txt / generals.txt，重新抽将）      ESC：退出
 * 交战界面（单独一屏，键盘鼠标都归它管；战斗中 ESC / R 故意不生效）：
@@ -69,6 +74,8 @@ TERRAIN_NAME = {OBSTACLE: "障碍", PLAIN: "通路", CITY: "城池"}
 TURN_LIMIT = 40         # 总回合数上限（双方各行动一次算 2 回合）
 MAX_STAMINA = 100
 MOVE_POINTS = 3         # 每回合移动力：最多走 3 格，每次一格（与体力无关）
+CELL_CAPACITY = 2       # 同一格最多站几名同阵营武将（敌我永远不能同格）
+RETREAT_MAX = MOVE_POINTS   # 一次撤退最多退几格；同一回合累计撤退格数封顶 MOVE_POINTS
 REGEN = {OBSTACLE: 0, PLAIN: 8, CITY: 16}
 
 MAX_STAT = 22           # generals.txt 里武力/智力的上限（下限 1）
@@ -83,13 +90,16 @@ PLAYER_NAME = {P1: "玩家一（红·蜀）", P2: "玩家二（蓝·魏）"}
 PLAYER_COLOR = {P1: (206, 74, 62), P2: (72, 124, 214)}
 PLAYER_COLOR_DARK = {P1: (128, 42, 36), P2: (40, 74, 136)}
 
-# 固定地图配置（不做随机生成）
+# 固定地图配置（不做随机生成）：每格写「地形:地名」，地形和地名同在一个文件里
 MAP_FILE = Path(__file__).with_name("map.txt")
 CITY_COUNT = 10                   # map.txt 里应正好有 10 座城池
-MAP_LEGEND = {                    # 配置字符 -> 地形
+NAME_SEP = ":"                    # 地形与地名的分隔符：.:樊城 / C:襄阳
+OBSTACLE_CHAR = "#"               # 障碍格只写这一个字符，没有地名
+CITY_CHAR = "C"                   # 城池格写成 C:城名
+MAP_LEGEND = {                    # 配置字符（冒号前的那个字符）-> 地形
     ".": PLAIN,
-    "#": OBSTACLE,
-    "C": CITY,
+    OBSTACLE_CHAR: OBSTACLE,
+    CITY_CHAR: CITY,
 }
 # 出生点不写进地图：开局时玩家二（魏）占北半场（前 5 行）、玩家一（蜀）占南半场（后 5 行），
 # 各自的武将再从本半场的通路/城池格里随机抽（障碍格不能站人）
@@ -114,6 +124,8 @@ C_OBSTACLE_LINE = (72, 66, 62)
 C_CITY = (128, 106, 72)
 C_CITY_ALT = (114, 94, 64)
 C_GRID = (30, 33, 30)
+C_PLACE = (168, 182, 164)        # 地图上通路的地名
+C_PLACE_CITY = (214, 190, 140)   # 地图上城池的地名
 C_TEXT = (228, 231, 238)
 C_TEXT_DIM = (150, 156, 170)
 C_SELECT = (255, 236, 150)
@@ -144,6 +156,15 @@ def get_font(size, bold=False):
     return font
 
 
+def fit_font(text, max_width, start=14, min_size=8, bold=True):
+    """挑一个能把 text 塞进 max_width 的字号：从 start 往下试，都不行就用 min_size。"""
+    for size in range(start, min_size - 1, -1):
+        font = get_font(size, bold=bold)
+        if font.size(text)[0] <= max_width:
+            return font
+    return get_font(min_size, bold=bold)
+
+
 # --------------------------------------------------------------------------
 # 配置文件（map.txt / generals.txt）
 # --------------------------------------------------------------------------
@@ -152,7 +173,7 @@ class ConfigError(Exception):
 
 
 class MapConfigError(ConfigError):
-    """map.txt 有问题（行数 / 字符 / 城池数 / 连通性 / 半场放不下武将）。"""
+    """map.txt 有问题（行数 / 每行格数 / 格内容 / 城池数 / 重名 / 连通性 / 半场放不下武将）。"""
 
 
 class RosterConfigError(ConfigError):
@@ -178,30 +199,57 @@ def read_config_lines(path):
 
 
 def parse_map(path):
-    """读取地图配置 -> grid（纯地形）；格式不对抛 MapConfigError。"""
-    # 行内的空格制表符只是排版用的，全部忽略
-    lines = [(no, "".join(text.split())) for no, text in read_config_lines(path)]
+    """读取地图配置 -> (grid, places)；格式不对抛 MapConfigError。
+
+    一格写一项：可通行格写「地形:地名」（如 .:樊城 / C:襄阳），障碍格只写 #。
+    地形和地名是同一次解析出来的，所以两者不可能对不上。
+    """
+    # 每格是一项、项间用空白分隔，所以直接按空白切
+    lines = [(no, text.split()) for no, text in read_config_lines(path)]
     if len(lines) != GRID:
         raise MapConfigError(f"地图应有 {GRID} 行，实际 {len(lines)} 行。")
 
     grid = [[PLAIN] * GRID for _ in range(GRID)]
+    places = {}
+    seen = {}
     cities = 0
-    for r, (no, text) in enumerate(lines):
-        if len(text) != GRID:
+    for r, (no, tokens) in enumerate(lines):
+        if len(tokens) != GRID:
             raise MapConfigError(
-                f"第 {no} 行应有 {GRID} 个地形字符，实际 {len(text)} 个：{text}")
-        for c, ch in enumerate(text):
-            if ch not in MAP_LEGEND:
+                f"第 {no} 行应有 {GRID} 格，实际 {len(tokens)} 格：{' '.join(tokens)}")
+        for c, token in enumerate(tokens):
+            head, sep, name = token.partition(NAME_SEP)
+            if head not in MAP_LEGEND:
                 raise MapConfigError(
-                    f"第 {no} 行第 {c + 1} 个地形字符是 {ch!r}（可用：{' '.join(MAP_LEGEND)}）")
-            grid[r][c] = MAP_LEGEND[ch]
-            if ch == "C":
+                    f"第 {no} 行第 {c + 1} 格写成了 {token!r}，地形字符应是 "
+                    f"{' '.join(MAP_LEGEND)} 之一，格式为 地形{NAME_SEP}地名"
+                    f"（障碍格只写 {OBSTACLE_CHAR}）。")
+            if head == OBSTACLE_CHAR:
+                if sep:
+                    raise MapConfigError(
+                        f"第 {no} 行第 {c + 1} 格是障碍，不能起名"
+                        f"（请只写 {OBSTACLE_CHAR}）：{token}")
+                grid[r][c] = OBSTACLE
+                continue
+            if not name or OBSTACLE_CHAR in name:
+                raise MapConfigError(
+                    f"第 {no} 行第 {c + 1} 格写成了 {token!r}，"
+                    f"可通行格必须写成 地形{NAME_SEP}地名（如 .{NAME_SEP}樊城 / C{NAME_SEP}襄阳），"
+                    f"且地名不能为空、不能用 {OBSTACLE_CHAR}。")
+            if name in seen:
+                raise MapConfigError(
+                    f"地名 {name!r} 在地图里出现了两次："
+                    f"({seen[name][0]},{seen[name][1]}) 和 ({r},{c})。")
+            seen[name] = (r, c)
+            grid[r][c] = MAP_LEGEND[head]
+            places[(r, c)] = name
+            if head == CITY_CHAR:
                 cities += 1
 
     if cities != CITY_COUNT:
         raise MapConfigError(f"地图应有 {CITY_COUNT} 座城池，实际 {cities} 座。")
     validate_map(grid)
-    return grid
+    return grid, places
 
 
 def walkable_in(grid, rows):
@@ -249,7 +297,7 @@ def pick_spawns(grid, rng):
 def parse_roster(path):
     """读取武将配置 -> {玩家: [GeneralSpec, ...]}；格式不对抛 RosterConfigError。
 
-    每行 4 项：阵营 姓名 武力 智力（例：蜀 关羽 97 76）。只解析，不抽将——
+    每行 4 项：阵营 姓名 武力 智力（例：蜀 关羽 21 14）。只解析，不抽将——
     哪 5 名上阵由 Game.create_generals 在开局时随机抽。
     """
     roster = {P1: [], P2: []}
@@ -304,6 +352,7 @@ class General:
         self.col = col
         self.alive = True
         self.move_points = MOVE_POINTS    # 本回合剩余移动力，每走相邻一格 -1（交战也 -1）
+        self.move_debt = 0                # 本回合累计撤退了几格 = 下回合要还的行动力
 
     @property
     def pos(self):
@@ -315,7 +364,26 @@ class General:
         return self.move_points <= 0
 
     def reset_turn(self):
-        self.move_points = MOVE_POINTS
+        """回合开始重置移动力：先扣掉上回合撤退透支的部分，不够扣就是 0。"""
+        self.move_points = max(0, MOVE_POINTS - self.move_debt)
+        self.move_debt = 0
+
+    @property
+    def retreat_room(self):
+        """这一回合还允许再撤几格：累计撤退格数封顶 MOVE_POINTS。
+
+        退满之后就没得退了——不是"透支封顶"，而是那种撤退根本不允许，
+        所以撤退选项里压根不会出现超过剩余额度的落脚点。
+        """
+        return max(0, MOVE_POINTS - self.move_debt)
+
+    def add_move_debt(self, steps):
+        """记一笔撤退透支（本回合累计撤退格数），下回合要还。
+
+        调用方必须先用 retreat_room 确认 steps 不超额度——这是一条规则，
+        不是可以夹一下就算了的事。
+        """
+        self.move_debt += steps
 
     def add_stamina(self, amount):
         self.stamina = max(0, min(self.max_stamina, self.stamina + amount))
@@ -331,11 +399,11 @@ class Game:
 
     # ---------------- 开局 ----------------
     def new_game(self):
-        # 两份配置都先读好、校好，再动对局状态；配置有问题时当前对局原样保留
-        grid = self.load_map()
+        # 配置都先读好、校好，再动对局状态；配置有问题时当前对局原样保留
+        grid, places = self.load_map()
         roster = self.load_roster()
         spawns = pick_spawns(grid, self.rng)   # 出生点不在地图里，开局随机分
-        self.grid, self.roster, self.spawns = grid, roster, spawns
+        self.grid, self.roster, self.places, self.spawns = grid, roster, places, spawns
         self.generals = []
         self.current = P1
         self.turn = 1
@@ -343,15 +411,19 @@ class Game:
         self.reachable = {}
         self.attackable = set()
         self.log = []
-        self.banner = None                # (文本, 剩余帧数)
-        self.winner = None
+        self.over = False                 # 对局是否已结束（平局也算结束，那时 winner 是 None）
+        self.winner = None                # 胜方；None 有可能是"还没结束"，也可能是"平局"
+        self.banner = None                # (文本, 剩余帧数)；帧数是 None 表示常驻不消失
         self.battle = None                # 正在进行的交战（Battle），非 None 时是交战界面
         self.push_log("新的一局开始，玩家一先行。")
         self.create_generals()
         self.start_turn(regen=False)
 
     def load_map(self, path=None):
-        """读地图配置 -> grid（校验不过抛 MapConfigError，不碰当前对局）。"""
+        """读地图配置 -> (grid, places)：地形和地名都来自同一个文件。
+
+        校验不过抛 MapConfigError，不碰当前对局。
+        """
         return parse_map(Path(path) if path else MAP_FILE)
 
     def load_roster(self, path=None):
@@ -375,22 +447,52 @@ class Game:
     def generals_at(self, r, c):
         return [g for g in self.generals if g.alive and g.pos == (r, c)]
 
-    def is_blocked(self, r, c):
-        """障碍或已有武将的格子：既不能走上去，也不能穿过去。"""
-        return self.grid[r][c] == OBSTACLE or bool(self.generals_at(r, c))
+    def describe(self, r, c):
+        """格子的称呼：地名（地形），如「襄阳（城池）」；障碍格没地名，只报地形。"""
+        terrain = self.grid[r][c]
+        if terrain == OBSTACLE:
+            return TERRAIN_NAME[terrain]
+        return f"{self.places[(r, c)]}（{TERRAIN_NAME[terrain]}）"
 
-    def free_for(self, gen, r, c):
-        """gen 能否站到 (r,c)：不是障碍，且除了 gen 自己之外没有别的武将。"""
-        if not (0 <= r < GRID and 0 <= c < GRID) or self.grid[r][c] == OBSTACLE:
+    def can_stop(self, gen, r, c):
+        """gen 能不能停在 (r,c)：通路/城池、没有敌方、且己方在那格凑不满 CELL_CAPACITY。
+
+        敌方格永远不能停——走进去等于交战，由 compute_attackable 单独给出。
+        """
+        if not self.in_bounds(r, c) or self.grid[r][c] == OBSTACLE:
             return False
-        return all(other is gen for other in self.generals_at(r, c))
+        others = [g for g in self.generals_at(r, c) if g is not gen]
+        if any(g.owner != gen.owner for g in others):
+            return False
+        return len(others) < CELL_CAPACITY
+
+    def can_transit(self, gen, r, c):
+        """gen 能不能路过 (r,c)：通路/城池且没有敌方。
+
+        己方格子就算已经站满 CELL_CAPACITY 也能穿过去（只要终态不超员），
+        自家的两个人不会把一条要道彻底堵死。
+        """
+        if not self.in_bounds(r, c) or self.grid[r][c] == OBSTACLE:
+            return False
+        return not any(g.owner != gen.owner for g in self.generals_at(r, c))
+
+    def in_bounds(self, r, c):
+        return 0 <= r < GRID and 0 <= c < GRID
+
+    def garrisons(self):
+        """{格子: [武将]}，只含活着的。同一格站两名时要分别画出来。"""
+        out = {}
+        for gen in self.generals:
+            if gen.alive:
+                out.setdefault(gen.pos, []).append(gen)
+        return out
 
     def compute_reachable(self, gen):
-        """BFS 算出该武将本回合能走到的空格 -> {pos: 需要花掉的移动力}
+        """BFS 算出该武将本回合能走到的落脚点 -> {pos: 需要花掉的移动力}
 
         移动力只决定能走多远，与体力无关；所以这里也不看体力。
-        这里只算空出来的落脚点：敌方武将的格子不在这里，走进去等于交战，
-        由 compute_attackable 单独给出。
+        只收录能"停"的格子：敌方格子不在这里（走进去等于交战，由 compute_attackable
+        单独给出），己方已经站满两名的那格只能路过、不能停。
         """
         if gen.exhausted:
             return {}
@@ -403,10 +505,11 @@ class Game:
             if d >= budget:                   # 再走一格就超出移动力了
                 continue
             for nr, nc in neighbors(r, c):
-                if (nr, nc) in seen or self.is_blocked(nr, nc):
+                if (nr, nc) in seen or not self.can_transit(gen, nr, nc):
                     continue
                 seen.add((nr, nc))
-                result[(nr, nc)] = d + 1
+                if self.can_stop(gen, nr, nc):     # 站不下就只当路过，不算落脚点
+                    result[(nr, nc)] = d + 1
                 q.append((nr, nc, d + 1))
         return result
 
@@ -430,80 +533,78 @@ class Game:
         self.attackable = set()
 
     def handle_board_click(self, row, col):
-        target = self.generals_at(row, col)
-        if target:
-            gen = target[0]
-            if gen.owner == self.current:
-                self.select(gen)              # 选自己人（含已走完的，用于看属性）
-                return
-            # 点敌人：必须已选中、且相邻（相邻格才能踏进去交战）
-            if self.selected and (row, col) in self.attackable:
-                self.charge(self.selected, gen)
-            elif self.selected:
-                self.push_log("要交战得先走到敌人旁边，从相邻格踏进去。")
-            return
+        # 先看"是不是走到这儿"：已经选中了武将、点的又是他能走到的落脚点。
+        # 落脚点只可能是空格或己方格（can_stop 挡掉了敌方格和自己那一格），
+        # 所以这条不会跟下面的"选中 / 攻击"抢——点了高亮格就是走过去。
         if self.selected and (row, col) in self.reachable:
             self.move(self.selected, row, col)
-        else:
+            return
+        target = self.generals_at(row, col)
+        if not target:
             self.clear_selection()
+            return
+        ours = [g for g in target if g.owner == self.current]
+        if ours:
+            self.click_own(ours)
+            return
+        # 点敌人：必须已选中、且相邻（相邻格才能踏进去交战）
+        if self.selected and (row, col) in self.attackable:
+            self.charge(self.selected, row, col)
+        elif self.selected:
+            self.push_log("要交战得先走到敌人旁边，从相邻格踏进去。")
+
+    def click_own(self, ours):
+        """点自己人：同格站着几名就依次轮换选中，轮完最后一个再点一下就取消选中。
+
+        取消选中是必要的退路：点的格子若是当前武将的落脚点，会被判成"走过去"，
+        想改选站在那格上的武将时，得先把选中清掉。
+        """
+        cycle = ours + [None]                 # 末尾的 None 表示"取消选中"
+        pos = cycle.index(self.selected) if self.selected in ours else -1
+        self.select(cycle[(pos + 1) % len(cycle)])
 
     def move(self, gen, row, col):
         """走一步（或一次走好几格）：按格数扣移动力，不扣体力。"""
         steps = self.reachable[(row, col)]
-        terrain = self.grid[row][col]
         gen.row, gen.col = row, col
         gen.move_points = max(0, gen.move_points - steps)
-        self.push_log(f"{gen.name} 移动 {steps} 格至 ({row},{col})，"
-                      f"{TERRAIN_NAME[terrain]}，剩余移动力 {gen.move_points}。")
+        self.push_log(f"{gen.name} 移动 {steps} 格至 {self.describe(row, col)}，"
+                      f"剩余移动力 {gen.move_points}。")
         self.select(gen)                      # 重新计算剩余可走范围
         # 移动后若与敌人相邻，提示可以打
         if self.compute_attackable(gen):
             self.push_log(f"{gen.name} 与敌军相邻，可以踏进去交战！")
 
     # ---------------- 战斗 ----------------
-    def charge(self, attacker, defender):
-        """从相邻格向敌方武将发动进攻：花 1 点移动力，然后切到交战界面打一场单挑。
+    def charge(self, attacker, row, col):
+        """向相邻的敌方武将格发动进攻：花 1 点移动力，然后切到交战界面。
 
-        真正的胜负判定与伤害结算都在 Battle 那一屏上完成（结算结果直接体现在双方体力上），
-        打完由 end_battle 回到地图。交战不结束该武将的行动：只要还有移动力，
-        就能接着走、接着撞下一个人。进攻方在交战期间不动窝——败了就是白花一点移动力。
+        这一格里可能有 1-2 名守将，谁先迎战由守方在交战界面里定；攻方得把他们
+        一个个打完才能进占这一格。真正的胜负判定与伤害结算都在 Battle 那一屏上完成
+        （结算结果直接体现在双方体力上），打完由 end_battle 回到地图。
+        交战不结束该武将的行动：只要还有移动力，就能接着走、接着撞下一个人。
+        进攻方在交战期间不动窝——败了就是白花一点移动力。
         """
+        defenders = self.generals_at(row, col)
         attacker.move_points = max(0, attacker.move_points - 1)
         self.clear_selection()                    # 交战期间棋盘不响应操作
-        self.battle = Battle(self, attacker, defender)
-        row, col = self.battle.cell
-        self.push_log(f"⚔ {attacker.name} 进攻 {defender.name}"
-                      f"（{TERRAIN_NAME[self.battle.terrain]}({row},{col})）。")
+        self.battle = Battle(self, attacker, defenders)
+        self.push_log(f"⚔ {attacker.name} 进攻 {self.describe(row, col)}"
+                      f"（守军：{'、'.join(g.name for g in defenders)}）。")
 
     def end_battle(self):
         """关掉交战界面，回到地图：让进攻方接着行动（前提是他还活着、还有移动力）。"""
         attacker = self.battle.atk
         self.battle = None
         self.check_victory()
-        if self.winner is not None or not attacker.alive or attacker.exhausted:
+        if self.over or not attacker.alive or attacker.exhausted:
             self.clear_selection()
         else:
             self.select(attacker)                 # 还有移动力就继续行动
 
-    def dislodge(self, gen, origin):
-        """把 gen 挤到旁边的空格：优先沿冲锋方向继续往外，再退回其它方向。"""
-        dirs = []
-        if origin is not None:
-            dr = (gen.row - origin[0])
-            dc = (gen.col - origin[1])
-            dr, dc = (dr > 0) - (dr < 0), (dc > 0) - (dc < 0)
-            if dr or dc:
-                dirs.append((dr, dc))
-        dirs += [d for d in ((-1, 0), (1, 0), (0, -1), (0, 1)) if d not in dirs]
-        for dr, dc in dirs:
-            if self.free_for(gen, gen.row + dr, gen.col + dc):
-                gen.row, gen.col = gen.row + dr, gen.col + dc
-                return True
-        return False
-
     # ---------------- 回合流程 ----------------
     def end_turn(self):
-        if self.winner is not None:
+        if self.over:                         # 已经分出胜负（含平局）就不再推进回合
             return
         self.clear_selection()
         self.current = 1 - self.current
@@ -549,9 +650,11 @@ class Game:
         return len(gens) * 100 + sum(g.stamina for g in gens) + cities * 50
 
     def set_winner(self, player, text):
+        """定下胜负：player 为 None 就是平局。两种情况下对局都算结束。"""
+        self.over = True
         self.winner = player
         self.push_log(text)
-        self.banner = [text, 60 * 30]         # 长提示常驻
+        self.banner = [text, None]            # 帧数 None = 常驻，胜负提示一直挂着
 
     # ---------------- 提示信息 ----------------
     def push_log(self, msg):
@@ -562,9 +665,9 @@ class Game:
         self.banner = [msg, frames]
 
     def tick(self):
-        if self.banner:
+        if self.banner and self.banner[1] is not None:   # 剩余帧数 None = 常驻提示，不倒数
             self.banner[1] -= 1
-            if self.banner[1] <= 0 and self.winner is None:
+            if self.banner[1] <= 0:
                 self.banner = None
 
     # ---------------- 绘制 ----------------
@@ -573,10 +676,17 @@ class Game:
 
     def draw(self, screen, mouse_pos, buttons):
         screen.fill(C_BG)
-        self.draw_board(screen)
+        self.draw_board(screen, mouse_pos)
         self.draw_sidebar(screen, mouse_pos, buttons)
 
-    def draw_board(self, screen):
+    def hovered_cell(self, mouse_pos):
+        """鼠标落在棋盘上就是 (行, 列)，否则 None。"""
+        x, y = mouse_pos[0] - MARGIN, mouse_pos[1] - MARGIN
+        if 0 <= x < BOARD and 0 <= y < BOARD:
+            return y // CELL, x // CELL
+        return None
+
+    def draw_board(self, screen, mouse_pos):
         # --- 地形 ---
         for r in range(GRID):
             for c in range(GRID):
@@ -591,31 +701,54 @@ class Game:
                     self.draw_city(screen, rect, r, c)
                 else:
                     pygame.draw.rect(screen, C_PLAIN if checker else C_PLAIN_ALT, rect)
+                    self.draw_place(screen, rect, r, c, C_PLACE)
                 pygame.draw.rect(screen, C_GRID, rect, 1)
 
         # --- 可走范围 / 可攻击目标 ---
         overlay = pygame.Surface((BOARD, BOARD), pygame.SRCALPHA)
-        for (r, c) in self.reachable:
+        for (r, c) in self.reachable:                 # 能走到的格子：选中色压淡
             x, y = c * CELL, r * CELL
-            pygame.draw.rect(overlay, (255, 236, 150, 55), (x, y, CELL, CELL))
-        for (r, c) in self.attackable:
+            pygame.draw.rect(overlay, (*C_SELECT, 55), (x, y, CELL, CELL))
+        for (r, c) in self.attackable:                # 能进攻的格子：进攻色压淡
             x, y = c * CELL, r * CELL
-            pygame.draw.rect(overlay, (255, 96, 82, 70), (x, y, CELL, CELL))
+            pygame.draw.rect(overlay, (*C_ATTACK, 70), (x, y, CELL, CELL))
         screen.blit(overlay, (MARGIN, MARGIN))
 
-        # --- 武将 ---
-        for gen in self.generals:
-            if gen.alive:
-                self.draw_general(screen, gen)
+        # --- 武将（同格站两名时左右分栏）---
+        for (r, c), gens in self.garrisons().items():
+            for gen, rect in zip(gens, self.general_rects(r, c, len(gens))):
+                self.draw_general(screen, gen, rect)
 
         # --- 选中框 ---
         if self.selected:
             rect = self.cell_rect(*self.selected.pos).inflate(2, 2)
             pygame.draw.rect(screen, C_SELECT, rect, 3, border_radius=4)
 
+        # --- 悬停格的地名（被武将压住的地名这样看）---
+        cell = self.hovered_cell(mouse_pos)
+        if cell:
+            self.draw_tooltip(screen, cell, mouse_pos)
+
     def draw_obstacle(self, screen, rect):
         pygame.draw.line(screen, C_OBSTACLE_LINE, rect.topleft, rect.bottomright, 2)
         pygame.draw.line(screen, C_OBSTACLE_LINE, rect.topright, rect.bottomleft, 2)
+
+    def draw_place(self, screen, rect, r, c, color):
+        """在格子底部写地名（通路青灰、城池金色）。"""
+        txt = get_font(11, bold=True).render(self.places[(r, c)], True, color)
+        screen.blit(txt, txt.get_rect(center=(rect.centerx, rect.bottom - 11)))
+
+    def draw_tooltip(self, screen, cell, mouse_pos):
+        """鼠标旁边弹出这一格的「地名（地形）」。"""
+        surf = get_font(13, bold=True).render(self.describe(*cell), True, (255, 246, 214))
+        box = surf.get_rect().inflate(18, 10)
+        box.topleft = (mouse_pos[0] + 14, mouse_pos[1] + 16)
+        box.clamp_ip(pygame.Rect(0, 0, WIN_W, WIN_H))       # 贴边时自动收回来
+        bg = pygame.Surface(box.size, pygame.SRCALPHA)
+        bg.fill((18, 18, 24, 226))
+        screen.blit(bg, box.topleft)
+        pygame.draw.rect(screen, (96, 104, 124), box, 1, border_radius=6)
+        screen.blit(surf, surf.get_rect(center=box.center))
 
     def draw_city(self, screen, rect, r, c):
         # 城墙砖缝
@@ -626,33 +759,46 @@ class Game:
         for i in range(3):
             x = rect.left + 6 + i * (CELL - 16) // 2
             pygame.draw.rect(screen, (150, 126, 88), (x, rect.top + 4, 8, 7))
+        # 城名
+        self.draw_place(screen, rect, r, c, C_PLACE_CITY)
         # 归属边框
         holder = self.generals_at(r, c)
         if holder:
             pygame.draw.rect(screen, PLAYER_COLOR[holder[0].owner], rect, 2, border_radius=3)
-        else:
-            f = get_font(11)
-            txt = f.render("城池", True, (206, 184, 140))
-            screen.blit(txt, txt.get_rect(center=(rect.centerx, rect.bottom - 12)))
 
-    def draw_general(self, screen, gen):
-        rect = self.cell_rect(gen.row, gen.col)
-        body = rect.inflate(-8, -8)
+    def general_rects(self, r, c, count):
+        """一格里的武将各占哪块地方：一个人占整格，两个人左右分栏。"""
+        base = self.cell_rect(r, c)
+        if count <= 1:
+            return [base]
+        half = base.width // 2
+        return [pygame.Rect(base.left, base.top, half, base.height),
+                pygame.Rect(base.left + half, base.top, base.width - half, base.height)]
+
+    def draw_general(self, screen, gen, rect):
+        """画一名武将；rect 是分给它的那一块（同格两名时只有半格宽）。"""
+        slim = rect.width < CELL
+        body = rect.inflate(-4 if slim else -8, -8)
         color = PLAYER_COLOR[gen.owner]
         dark = PLAYER_COLOR_DARK[gen.owner]
         # 圆角方块作为武将底盘
         pygame.draw.rect(screen, dark, body, border_radius=8)
-        pygame.draw.rect(screen, color, body.inflate(-4, -4), border_radius=6)
+        pygame.draw.rect(screen, color, body.inflate(-2 if slim else -4, -4), border_radius=6)
 
-        name_font = get_font(14, bold=True)
-        stat_font = get_font(11)
+        # 姓名：字号按可用宽度收缩，三字名在半格宽里也塞得下
+        name_font = fit_font(gen.name, body.width - 4, start=12 if slim else 14)
         name_txt = name_font.render(gen.name, True, (255, 255, 255))
-        screen.blit(name_txt, name_txt.get_rect(center=(rect.centerx, rect.top + 15)))
-        stat_txt = stat_font.render(f"武{gen.might} 智{gen.intellect}", True, (250, 250, 250))
-        screen.blit(stat_txt, stat_txt.get_rect(center=(rect.centerx, rect.top + 32)))
+        screen.blit(name_txt, name_txt.get_rect(
+            center=(body.centerx, body.top + (12 if slim else 15))))
+
+        # 属性行：半格宽实在放不下，索性省掉（悬停提示和侧边栏里还有）
+        if not slim:
+            stat_txt = get_font(11).render(f"武{gen.might} 智{gen.intellect}",
+                                           True, (250, 250, 250))
+            screen.blit(stat_txt, stat_txt.get_rect(center=(body.centerx, body.top + 32)))
 
         # 体力条
-        bar = pygame.Rect(rect.left + 9, rect.bottom - 15, CELL - 18, 6)
+        bar = pygame.Rect(body.left + 3, body.bottom - 11, body.width - 6, 6)
         pygame.draw.rect(screen, (20, 20, 24), bar, border_radius=3)
         ratio = max(0.0, gen.stamina / gen.max_stamina)
         fill = bar.copy()
@@ -660,7 +806,7 @@ class Game:
         hp_color = (96, 208, 112) if ratio > 0.5 else (232, 196, 72) if ratio > 0.25 else (226, 84, 72)
         pygame.draw.rect(screen, hp_color, fill, border_radius=3)
         hp_txt = get_font(10).render(str(gen.stamina), True, (245, 245, 245))
-        screen.blit(hp_txt, hp_txt.get_rect(center=(rect.centerx, rect.bottom - 6)))
+        screen.blit(hp_txt, hp_txt.get_rect(center=(body.centerx, body.bottom - 2)))
 
         if gen.exhausted:
             veil = pygame.Surface(body.size, pygame.SRCALPHA)
@@ -679,7 +825,7 @@ class Game:
         screen.blit(get_font(22, bold=True).render("三国战棋", True, C_TEXT), (panel.left + 16, y))
         y += 32
 
-        if self.winner is None:
+        if not self.over:
             screen.blit(get_font(13).render(f"第 {self.turn} / {TURN_LIMIT} 回合",
                                             True, C_TEXT_DIM), (panel.left + 16, y))
             y += 22
@@ -744,7 +890,7 @@ class Game:
         box = pygame.Rect(panel.left + 16, y, panel.width - 32, 92)
         pygame.draw.rect(screen, (42, 46, 58), box, border_radius=8)
         if not gen or not gen.alive:
-            tip = get_font(12).render("点击己方武将查看详情 / 移动", True, C_TEXT_DIM)
+            tip = get_font(12).render("点己方武将选中，再点高亮格移动", True, C_TEXT_DIM)
             screen.blit(tip, tip.get_rect(center=box.center))
             return box.bottom + 12
         pygame.draw.rect(screen, PLAYER_COLOR[gen.owner], box, 2, border_radius=8)
@@ -756,7 +902,7 @@ class Game:
         screen.blit(f_sm.render(
             f"体力 {gen.stamina}/{gen.max_stamina}   移动力 {gen.move_points}/{MOVE_POINTS}",
             True, C_TEXT), (box.left + 12, box.top + 54))
-        note = f"位于 {TERRAIN_NAME[self.grid[gen.row][gen.col]]} ({gen.row},{gen.col})"
+        note = f"位于 {self.describe(gen.row, gen.col)}"
         if gen.exhausted:
             note += "  · 本回合已走完"
         elif self.compute_attackable(gen):
@@ -786,28 +932,53 @@ class Game:
 # 交战界面（单独的一屏）
 # --------------------------------------------------------------------------
 class Battle:
-    """一次交战的独立界面：双方在这里打一场至少 1 回合、可以主动撤退的单挑。
+    """一次交战的独立界面：一格守军最多两名，攻方要把他们一个个打完。
 
-    规则（胜负判定 + 伤害结算都在这屏上完成）
+    出战顺序
+    --------
+    * 攻方踏进敌方格子时，若那格有两名守将，**由守方决定谁先迎战**（PICK_DEFENDER）。
+    * 攻方与第一名守将打完（守将撤退或阵亡）后，只要这一格还有守将，就自动接着打
+      下一名。**第二场开打前双方都可以选择撤退**（仍是攻方先选）——因为这时攻方
+      已经打了一场、守方却是生力军，给双方一个收手的机会。
+    * 把守将全部打完、且攻方自己没退没死，攻方才进占这一格。
+
+    单挑规则（胜负判定 + 伤害结算都在这屏上完成）
     ------------------------------------------
     * 每回合双方**同时**掉体力，掉多少只看**对方**武力：取闭区间
       [1, LOSS_MAX_PER_MIGHT * 对方武力] 里的一个随机整数（默认就是 2 倍对方武力）。
       武力高的武将打得疼，也扛得住——因为对方的武力决定了"打他多重"。
     * 每回合结束时双方都可以选择撤退，由**攻方先选**；撤退的一方算败方。
-      两边都选继续就进下一回合，所以撤退至少要等第 1 回合打完才能选（交战至少 1 回合）。
-    * 体力掉到 0 或以下即阵亡，同样算败方；双方同一回合都掉到 0 就是同归于尽（平局）。
-    * 打完时双方剩多少体力，就是这场交战的伤害结算结果——不再有额外的伤害公式，
-      战果（谁占这一格）由 apply() 落回地图。
+      两边都选继续就进下一回合，所以第一场撤退至少要等第 1 回合打完才能选。
+    * 体力掉到 0 或以下即阵亡，同样算败方；双方同一回合都掉到 0 就是同归于尽。
+    * 打完时双方剩多少体力，就是这场交战的伤害结算结果——不再有额外的伤害公式。
+
+    撤退
+    ----
+    * **攻方撤退**：只是回到出发格（攻方在交战期间本来就没动窝），不额外扣移动力。
+    * **守方撤退**：从争夺格做 BFS，挑一个落脚点撤过去，撤几格就**透支下回合几点行动力**。
+      路径是 BFS 算出来的，**可以拐弯、不要求走直线**；约束是第一步不能迎着攻方来的方向，
+      中途每格要过得去（通路/城池、无敌方），落脚那格还要停得下（己方不满 CELL_CAPACITY）。
+      步数取 BFS 最短距离，所以每个落脚点对应一个确定的透支数。
+    * **同一回合累计撤退格数封顶 MOVE_POINTS**：已经撤过的格数一扣，剩下的才是这轮的额度
+      （退满满额，下回合就走不动了）。额度不够的落脚点根本不算合法撤退，不会列出来；
+      额度为 0 时守方就没有撤退的权利。
+    * 一个落脚点都没有时，守方**没有撤退的权利**，界面上不给"撤退"按钮，只能继续缠斗。
+      可选项不止一个时由守方自己挑（RETREAT_PICK）。
 
     状态流转
     --------
-        READY --交手--> IMPACT --掉血动画放完--> 有人阵亡？ --> OVER
+        PICK_DEFENDER --点将--> 第一场 READY
+        第一场: READY --交手--> IMPACT --掉血动画放完--> 有人下场？ --> 换人 / 收场
                                               \\--> 都还活着 --> CHOOSE_ATK
+        第二场: 直接从 CHOOSE_ATK 起手（第一回合前双方都能撤）
         CHOOSE_ATK --继续--> CHOOSE_DFD --继续--> 下一回合的 READY
-        CHOOSE_ATK / CHOOSE_DFD --撤退--> OVER --返回战场--> 回到地图
+        CHOOSE_ATK --撤退--> OVER（攻方原地不动）
+        CHOOSE_DFD --撤退--> RETREAT_PICK --选好方向步数--> 换人 / 攻方进占
+        OVER --返回战场--> 回到地图
     """
 
-    READY, IMPACT, CHOOSE_ATK, CHOOSE_DFD, OVER = range(5)
+    (PICK_DEFENDER, READY, IMPACT,
+     CHOOSE_ATK, CHOOSE_DFD, RETREAT_PICK, OVER) = range(7)
     IMPACT_FRAMES = 42                     # 掉血动画时长（帧，60fps 约 0.7 秒）
     SHAKE = (0, -4, 3, -3, 2, -2, 1, 0)    # 掉血瞬间卡片的抖动偏移
     HIST_ROWS = 5                          # 战斗过程一屏显示几回合（多出来的可以翻）
@@ -817,29 +988,49 @@ class Battle:
     CARD_X = (40, WIN_W - 40 - CARD_W)
     BTN_W, BTN_H, BTN_Y = 220, 52, 412
     HIST_RECT = pygame.Rect(40, 476, WIN_W - 80, 166)
+    PICK_COLS = 4                          # 撤退选项：4 列铺在战报那块地方
     HINT_Y, FOOT_Y = 348, 654
 
-    def __init__(self, game, attacker, defender):
+    def __init__(self, game, attacker, defenders):
         self.game = game
         self.rng = game.rng
         self.atk = attacker
-        self.dfd = defender
-        self.cell = defender.pos              # 争夺中的格子（守方原本站的地方）
+        self.defenders = list(defenders)      # 这一格的守军，出场顺序由守方定
+        self.cell = self.defenders[0].pos     # 争夺中的格子（守方原本站的地方）
         self.origin = attacker.pos            # 攻方的出发格（攻方败了原地不动）
-        self.terrain = game.grid[self.cell[0]][self.cell[1]]
+        self.place = game.describe(*self.cell)           # 争夺中的这一格：地名（地形）
+        self.origin_place = game.describe(*self.origin)   # 攻方是从哪一格打过来的
+        self.fight_no = 1                     # 第几场（守军最多两名，所以最多两场）
+        self.dfd = None                       # 当前迎战的守将
         self.round = 0
         self.rounds = []                      # 每回合一条战报，见 roll()
         self.scroll = 0                       # 战斗过程往上翻了几回合（0 = 贴着最新一条）
-        self.state = self.READY
         self.timer = 0
-        self.outcome = None                   # "atk" 攻方胜 / "dfd" 守方胜 / "draw" 同归于尽
+        self.atk_retreated = False            # 攻方退过，就不再进占这一格
+        self.retreat_choices = []             # RETREAT_PICK 阶段可点的 (落脚点, 步数)
+        self.retreat_from = None              # 从哪个状态点进撤退选择的（"再想想"用）
         self.ending = ""
-        self.hint = (f"两军在 {TERRAIN_NAME[self.terrain]}"
-                     f"({self.cell[0]},{self.cell[1]}) 列阵，准备交手。")
+        if len(self.defenders) > 1:
+            self.state = self.PICK_DEFENDER
+            self.hint = f"{self.place} 有两名守将，请守方决定谁先出阵迎战。"
+        else:
+            self.begin_fight(self.defenders[0])
+            self.hint = f"两军在 {self.place} 列阵，准备交手。"
+
+    def begin_fight(self, defender):
+        """让 defender 上场迎战：第一场从 READY 起手，第二场从"开打前可撤退"起手。"""
+        self.dfd = defender
+        self.round = 0
+        self.scroll = 0
+        self.timer = 0
+        self.state = self.CHOOSE_ATK if self.fight_no > 1 else self.READY
+        if self.state == self.CHOOSE_ATK:
+            self.hint = (f"第 {self.fight_no} 场：{defender.name} 接着迎战。"
+                         f"开打前双方都还能收手——{self.atk.name}（攻方）先决定。")
 
     # ---------------- 规则 ----------------
     def foe_of(self, gen):
-        """gen 的对手。"""
+        """gen 的对手；守方的对手就是攻方，攻方的对手是当前迎战的那名守将。"""
         return self.dfd if gen is self.atk else self.atk
 
     def loss_range(self, victim):
@@ -856,9 +1047,16 @@ class Battle:
         return None
 
     @property
+    def pre_round(self):
+        """现在是不是"第一回合开打之前"的那个选择（只有第二场才有）。"""
+        return self.round == 0 and self.state in (self.CHOOSE_ATK, self.CHOOSE_DFD)
+
+    @property
     def shown_round(self):
-        """界面上该显示的回合数：READY 时是即将开打的这一回合。"""
-        return self.round + 1 if self.state == self.READY else self.round
+        """界面上该显示的回合数：准备阶段显示的是即将开打的这一回合。"""
+        if self.state == self.READY or self.pre_round:
+            return self.round + 1
+        return max(1, self.round)
 
     def roll(self):
         """交手一回合：双方同时按对方武力掉体力（各取一个 [1, 2*对方武力] 的随机数）。"""
@@ -872,32 +1070,30 @@ class Battle:
         for gen in (self.atk, self.dfd):
             if gen.stamina <= 0:
                 gen.alive = False             # 掉到 0 或以下当场阵亡
-        self.rounds.append({"no": self.round, "atk_loss": atk_loss, "dfd_loss": dfd_loss,
+        # 战报里连守将一起记下来：换人之后还要能把这一场画回历史里
+        self.rounds.append({"fight": self.fight_no, "no": self.round, "dfd": self.dfd,
+                            "atk_loss": atk_loss, "dfd_loss": dfd_loss,
                             "atk_hp": self.atk.stamina, "dfd_hp": self.dfd.stamina})
         self.hint = (f"第 {self.round} 回合：{self.atk.name} 掉 {atk_loss} 点体力，"
                      f"{self.dfd.name} 掉 {dfd_loss} 点体力。")
         self.state, self.timer = self.IMPACT, self.IMPACT_FRAMES
 
     def update(self):
-        """掉血动画放完后决定下一步：有人阵亡就收场，否则交给双方做选择。"""
+        """掉血动画放完后决定下一步：有人下场就换人/收场，否则交给双方做选择。"""
         if self.state != self.IMPACT:
             return
         self.timer -= 1
         if self.timer > 0:
             return
-        if not self.atk.alive and not self.dfd.alive:
-            self.finish("draw", f"{self.atk.name} 与 {self.dfd.name} 同归于尽，双双阵亡。")
-        elif not self.atk.alive:
-            self.finish("dfd", f"{self.atk.name} 力竭阵亡，{self.dfd.name} 守住了阵脚。")
-        elif not self.dfd.alive:
-            self.finish("atk", f"{self.dfd.name} 力竭阵亡，{self.atk.name} 获胜。")
-        else:
-            self.state = self.CHOOSE_ATK
-            self.hint = (f"第 {self.round} 回合结束，{self.atk.name}（攻方）先决定："
-                         f"继续缠斗，还是就此撤退？")
+        if not self.atk.alive or not self.dfd.alive:
+            self.settle_fight()
+            return
+        self.state = self.CHOOSE_ATK
+        self.hint = (f"第 {self.round} 回合结束，{self.atk.name}（攻方）先决定："
+                     f"继续缠斗，还是就此撤退？")
 
     def continue_fight(self):
-        """选择继续：攻方选完轮到守方，两边都选继续就打下一回合。"""
+        """选择继续：攻方选完轮到守方，两边都选继续就打下一回合（或第二场的第一回合）。"""
         if self.state == self.CHOOSE_ATK:
             self.state = self.CHOOSE_DFD
             self.hint = (f"{self.atk.name} 继续缠斗，现在轮到 {self.dfd.name}（守方）"
@@ -906,41 +1102,136 @@ class Battle:
             self.state = self.READY
             self.hint = f"双方各自重整旗鼓，第 {self.round + 1} 回合准备交手。"
 
-    def retreat(self, gen):
-        """选择撤退：退的一方算败方，交战立刻结束。"""
-        if self.state not in (self.CHOOSE_ATK, self.CHOOSE_DFD):
-            return
-        if gen is self.atk:
-            self.finish("dfd", f"{self.atk.name} 撤退，判为败方；{self.dfd.name} 获胜。")
-        else:
-            self.finish("atk", f"{self.dfd.name} 撤退，判为败方；{self.atk.name} 获胜。")
-
-    def finish(self, outcome, text):
-        """定下胜负，并把战果落回地图。"""
-        self.outcome, self.ending, self.state = outcome, text, self.OVER
-        self.hint = text
-        self.apply()
-
-    def apply(self):
-        """战果落回地图：战报 + 格子归属。
-
-        * 攻方胜：守方（还活着的话）撤到旁边的空格，攻方进占这一格；
-          守方撤退却无处可挪时，攻方也不进占（沿用旧规则，避免把人挤掉）。
-        * 守方胜：攻方原地不动，守方守住这一格。
-        * 同归于尽：两边都从棋盘上消失，格子空着。
-        """
+    def settle_fight(self):
+        """一场打完（有人阵亡）：报战报，然后决定是换人接着打还是收场。"""
         game, atk, dfd = self.game, self.atk, self.dfd
-        game.push_log(f"⚔ {atk.name} vs {dfd.name} 共 {self.round} 回合：{self.ending}")
         for gen in (atk, dfd):
             if not gen.alive:
                 game.push_log(f"☠ {gen.name} 体力耗尽，阵亡！")
-        if self.outcome != "atk":
-            return
-        if dfd.alive and not game.dislodge(dfd, self.origin):
-            game.push_log(f"{dfd.name} 想撤却没有空位，{atk.name} 也未能进占，双方各自在原地。")
+        if not atk.alive and not dfd.alive:
+            text = f"{atk.name} 与 {dfd.name} 同归于尽，双双阵亡。"
+        elif not atk.alive:
+            text = f"{atk.name} 力竭阵亡，{dfd.name} 守住了阵脚。"
         else:
-            atk.row, atk.col = self.cell
-            game.push_log(f"{atk.name} 进占 ({self.cell[0]},{self.cell[1]})。")
+            text = f"{dfd.name} 力竭阵亡，{atk.name} 获胜。"
+        game.push_log(f"⚔ {atk.name} vs {dfd.name} 共 {self.round} 回合：{text}")
+        self.ending = text
+        self.advance(text)
+
+    def advance(self, text):
+        """一名守将下场了：攻方还在就换下一名接着打，守军打光了就收场。"""
+        if self.atk_retreated or not self.atk.alive:
+            self.finish(text)
+            return
+        rest = [g for g in self.defenders if g.alive and g.pos == self.cell]
+        if rest:
+            self.fight_no += 1
+            self.begin_fight(rest[0])
+            return
+        self.finish(text)
+
+    def finish(self, text):
+        """整场交战结束：定下结算文字，把战果落回地图。"""
+        self.state, self.hint = self.OVER, text
+        self.apply()
+
+    def apply(self):
+        """战果落回地图：守军清空且攻方没退没死，攻方才进占这一格。"""
+        game, atk = self.game, self.atk
+        if self.atk_retreated or not atk.alive:
+            return
+        if any(g.alive and g.pos == self.cell for g in self.defenders):
+            return                            # 还有守将在，格子不归攻方
+        atk.row, atk.col = self.cell
+        game.push_log(f"{atk.name} 进占 {game.describe(*self.cell)}。")
+
+    # ---------------- 撤退 ----------------
+    def came_direction(self):
+        """攻方是从哪个方向来的（从争夺格指向攻方出发格的单位向量）。"""
+        dr = self.origin[0] - self.cell[0]
+        dc = self.origin[1] - self.cell[1]
+        return ((dr > 0) - (dr < 0), (dc > 0) - (dc < 0))
+
+    def retreat_paths(self):
+        """守方能撤到哪几格、各要几步 -> {终点: 步数}；一处都去不了就是空。
+
+        从争夺格做 BFS：一格一格挪，**可以拐弯，不要求走直线**。约束有这么几条——
+        * 第一步不能迎着攻方来的方向（那是朝刀口上撞）；
+        * 中途每一格都要"过得去"（通路/城池、没有敌方）；
+        * 落脚的那一格还要"停得下"（己方不满 CELL_CAPACITY）；
+        * 加上本回合已经撤过的格数，累计不能超过 MOVE_POINTS——超了就不是合法的撤退，
+          那些落脚点压根不会列出来。
+        步数取的是 BFS 最短距离，也就等于这次撤退要透支的行动力。
+        """
+        cell = self.cell
+        came = self.came_direction()
+        limit = min(RETREAT_MAX, self.dfd.retreat_room)   # 本回合还剩多少撤退额度
+        dests = {}
+        if limit <= 0:
+            return dests                                # 退满了，没得退
+        seen = {cell}
+        q = deque([(cell[0], cell[1], 0)])
+        while q:
+            r, c, d = q.popleft()
+            if d >= limit:
+                continue
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                if d == 0 and (dr, dc) == came:
+                    continue
+                nr, nc = r + dr, c + dc
+                if (nr, nc) in seen or not self.game.can_transit(self.dfd, nr, nc):
+                    continue
+                seen.add((nr, nc))
+                if self.game.can_stop(self.dfd, nr, nc):   # 停不下就只当路过
+                    dests[(nr, nc)] = d + 1
+                q.append((nr, nc, d + 1))
+        return dests
+
+    def retreat_options(self):
+        """候选落脚点，按"先近后远"排好 -> [(终点, 步数)]：退得越少，透支越少。"""
+        return sorted(self.retreat_paths().items(), key=lambda kv: (kv[1], kv[0]))
+
+    def can_retreat(self):
+        """当前该做决定的一方有没有撤退的权利：攻方永远有（原地退回），守方要有退路。"""
+        if self.chooser is self.atk:
+            return True
+        return bool(self.retreat_paths())
+
+    def request_retreat(self, gen):
+        """点了"撤退"：攻方直接原地退回，守方先挑撤到哪一格。"""
+        if gen is self.atk:
+            self.atk_retreated = True
+            text = f"{self.atk.name} 撤退，判为败方；{self.dfd.name} 守住 {self.place}。"
+            self.game.push_log(f"⚔ {self.atk.name} 从 {self.place} 撤退，退回原地。")
+            self.finish(text)
+            return
+        options = self.retreat_options()
+        if not options:
+            return                            # 没退路时本来就不给按钮，这里只是兜底
+        if len(options) == 1:                 # 只有一条路，不用再让玩家点一次
+            self.apply_retreat(*options[0])
+            return
+        self.retreat_choices = options
+        self.retreat_from = self.state
+        self.state = self.RETREAT_PICK
+        self.hint = (f"{gen.name} 往哪撤？（{len(options)} 个落脚点可选，"
+                     f"第一步不能迎着攻方来；本回合还剩 {gen.retreat_room} 格额度）")
+
+    def apply_retreat(self, dest, steps):
+        """守方撤退落地：挪过去，并把步数记成下回合要还的行动力。"""
+        gen = self.dfd
+        if steps > gen.retreat_room:            # 选项都是按额度生成的，这里只是兜底
+            return
+        self.retreat_choices = []               # 选完了，选项作废
+        gen.row, gen.col = dest
+        gen.add_move_debt(steps)
+        to = self.game.describe(*dest)
+        self.game.push_log(
+            f"⚔ {gen.name} 从 {self.place} 撤退 {steps} 格到 {to}"
+            f"（判为败方，本回合累计撤退 {gen.move_debt} 格，"
+            f"下回合透支 {gen.move_debt} 点行动力）。")
+        self.ending = f"{gen.name} 撤到 {to}，判为败方；{self.atk.name} 占上风。"
+        self.advance(self.ending)
 
     # ---------------- 操作 ----------------
     def button_rect(self, index, count):
@@ -950,14 +1241,38 @@ class Battle:
         left = (WIN_W - total) // 2 + index * (self.BTN_W + gap)
         return pygame.Rect(left, self.BTN_Y, self.BTN_W, self.BTN_H)
 
+    def pick_rect(self, index, count):
+        """撤退选项按钮：PICK_COLS 列，铺在战报那块地方（这一屏不显示战报）。"""
+        rect, gap = self.HIST_RECT, 12
+        cols = self.PICK_COLS
+        rows = max(1, -(-count // cols))       # 向上取整
+        w = (rect.width - (cols - 1) * gap) // cols
+        h = (rect.height - (rows - 1) * gap) // rows
+        return pygame.Rect(rect.left + (index % cols) * (w + gap),
+                           rect.top + (index // cols) * (h + gap), w, h)
+
     def buttons(self):
         """当前状态下可点的按钮 -> [(文字, Rect, 动作)]。"""
+        if self.state == self.PICK_DEFENDER:
+            count = len(self.defenders)
+            return [(f"{g.name} 先出阵", self.button_rect(i, count), f"pick:{i}")
+                    for i, g in enumerate(self.defenders)]
         if self.state == self.READY:
             return [("交手", self.button_rect(0, 1), "roll")]
         if self.state in (self.CHOOSE_ATK, self.CHOOSE_DFD):
-            who = "atk_retreat" if self.state == self.CHOOSE_ATK else "dfd_retreat"
-            return [("继续缠斗", self.button_rect(0, 2), "hold"),
-                    ("撤退（判负）", self.button_rect(1, 2), who)]
+            action = "atk_retreat" if self.state == self.CHOOSE_ATK else "dfd_retreat"
+            options = [("继续缠斗", "hold")]
+            if self.can_retreat():            # 守方没退路时，连按钮都不给
+                options.append(("撤退（判负）", action))
+            return [(label, self.button_rect(i, len(options)), act)
+                    for i, (label, act) in enumerate(options)]
+        if self.state == self.RETREAT_PICK:
+            count = len(self.retreat_choices)
+            picks = [(f"撤至 {self.game.places[dest]}（{n} 点）",
+                      self.pick_rect(i, count), f"retreat:{i}")
+                     for i, (dest, n) in enumerate(self.retreat_choices)]
+            picks.append(("再想想（回去缠斗）", self.button_rect(0, 1), "back"))
+            return picks
         if self.state == self.OVER:
             return [("返回战场", self.button_rect(0, 1), "close")]
         return []                             # IMPACT：掉血动画中，不接受操作
@@ -968,11 +1283,26 @@ class Battle:
         elif action == "hold":
             self.continue_fight()
         elif action == "atk_retreat":
-            self.retreat(self.atk)
+            self.request_retreat(self.atk)
         elif action == "dfd_retreat":
-            self.retreat(self.dfd)
+            self.request_retreat(self.dfd)
+        elif action == "back":
+            self.retreat_choices = []                 # 别把这一轮的选项留到下一轮
+            self.state = self.retreat_from
+            self.hint = "重新决定：继续缠斗，还是撤退？"
+        elif action.startswith("pick:"):
+            self.pick_defender(int(action.split(":")[1]))
+        elif action.startswith("retreat:"):
+            self.apply_retreat(*self.retreat_choices[int(action.split(":")[1])])
         elif action == "close":
             self.game.end_battle()
+
+    def pick_defender(self, index):
+        """守方定下谁先出阵：选中的先上，另一名排在后面等着。"""
+        first = self.defenders[index]
+        self.defenders = [first] + [g for g in self.defenders if g is not first]
+        self.game.push_log(f"{first.name} 出阵迎战 {self.atk.name}。")
+        self.begin_fight(first)
 
     def handle_click(self, pos):
         for _label, rect, action in self.buttons():
@@ -989,31 +1319,50 @@ class Battle:
         return max(0, len(self.rounds) - self.HIST_ROWS)
 
     def primary(self):
-        """空格 / 回车：走第一个按钮（继续缠斗 / 交手 / 返回战场），不会误触撤退。"""
+        """空格 / 回车：走第一个按钮（交手 / 继续缠斗 / 返回战场），不会误触撤退。
+
+        点将和挑撤退方向那两屏例外：那里的按钮都是"替自己做决定"，按空格什么都不做，
+        必须用鼠标点，免得手一快就替守方定了出战顺序或撤退方向。
+        """
+        if self.state in (self.PICK_DEFENDER, self.RETREAT_PICK):
+            return
         buttons = self.buttons()
         if buttons:
             self.act(buttons[0][2])
 
     # ---------------- 绘制 ----------------
     def card_rect(self, gen):
+        if self.state == self.PICK_DEFENDER:   # 点将那一屏：两名守将各占一张牌
+            return pygame.Rect(self.CARD_X[self.defenders.index(gen) % 2],
+                               self.CARD_Y, self.CARD_W, self.CARD_H)
         return pygame.Rect(self.CARD_X[0 if gen is self.atk else 1],
                            self.CARD_Y, self.CARD_W, self.CARD_H)
 
     def draw(self, screen, mouse_pos):
         screen.fill(C_BG)
         self.draw_header(screen)
-        self.draw_card(screen, self.atk, "攻方")
-        self.draw_card(screen, self.dfd, "守方")
-        self.draw_vs(screen)
-        self.draw_history(screen)
+        if self.state == self.PICK_DEFENDER:
+            for i, gen in enumerate(self.defenders):
+                self.draw_card(screen, gen, f"守将 {i + 1}")
+        else:
+            self.draw_card(screen, self.atk, "攻方")
+            self.draw_card(screen, self.dfd, "守方")
+            self.draw_vs(screen)
+        if self.state != self.RETREAT_PICK:    # 挑撤退方向时，那块地方让给选项按钮
+            self.draw_history(screen)
         self.draw_controls(screen, mouse_pos)
 
     def draw_header(self, screen):
         title = get_font(26, bold=True).render("交战", True, C_TEXT)
         screen.blit(title, title.get_rect(midtop=(WIN_W // 2, 16)))
-        sub = (f"{self.atk.name}（{PLAYER_NAME[self.atk.owner]}）进攻 "
-               f"{self.dfd.name}（{PLAYER_NAME[self.dfd.owner]}）驻守的 "
-               f"{TERRAIN_NAME[self.terrain]} ({self.cell[0]},{self.cell[1]})")
+        if self.dfd is None:                   # 点将阶段还没有"当前守将"
+            sub = (f"{self.atk.name}（{PLAYER_NAME[self.atk.owner]}）进攻 {self.place}，"
+                   f"守军 {len(self.defenders)} 人")
+        else:
+            sub = (f"{self.atk.name}（{PLAYER_NAME[self.atk.owner]}）进攻 "
+                   f"{self.dfd.name}（{PLAYER_NAME[self.dfd.owner]}）驻守的 {self.place}")
+            if len(self.defenders) > 1:
+                sub += f"　·　第 {self.fight_no} 场 / 共 {len(self.defenders)} 场"
         surf = get_font(14).render(sub, True, C_TEXT_DIM)
         screen.blit(surf, surf.get_rect(midtop=(WIN_W // 2, 52)))
 
@@ -1043,8 +1392,8 @@ class Battle:
         # 顶栏：攻方/守方 + 站位
         tag = get_font(14, bold=True).render(side_label, True, color)
         screen.blit(tag, (rect.left + 16, rect.top + 12))
-        where = (f"从 ({self.origin[0]},{self.origin[1]}) 进攻" if gen is self.atk else
-                 f"驻守 {TERRAIN_NAME[self.terrain]} ({self.cell[0]},{self.cell[1]})")
+        where = (f"从 {self.origin_place} 进攻" if gen is self.atk else
+                 f"驻守 {self.place}")
         info = get_font(12).render(where, True, C_TEXT_DIM)
         screen.blit(info, info.get_rect(midright=(rect.right - 16, rect.top + 20)))
 
@@ -1070,9 +1419,19 @@ class Battle:
             note, note_color = "该你决定（继续 / 撤退）", C_SELECT
         else:
             note, note_color = "", C_TEXT_DIM
+        if self.state == self.PICK_DEFENDER:
+            note, note_color = "点下方按钮决定谁先出阵", C_SELECT
         if note:
             screen.blit(get_font(16, bold=True).render(note, True, note_color),
                         (rect.left + 16, rect.top + 186))
+
+        # 守方卡片：这一格还有谁在后面等着上场
+        if gen is self.dfd and len(self.defenders) > 1:
+            waiting = [g.name for g in self.defenders if g is not gen and g.alive]
+            if waiting:
+                screen.blit(get_font(12).render(f"阵中还有：{'、'.join(waiting)}",
+                                                True, C_TEXT_DIM),
+                            (rect.left + 16, rect.top + 214))
 
         # 掉血动画：卡片泛红 + 上浮的掉血数字
         if progress is not None:
@@ -1118,7 +1477,7 @@ class Battle:
     def draw_history(self, screen):
         rect = self.HIST_RECT
         pygame.draw.rect(screen, C_PANEL, rect, border_radius=10)
-        pygame.draw.rect(screen, (52, 57, 70), rect, 1, border_radius=10)
+        pygame.draw.rect(screen, C_BTN, rect, 1, border_radius=10)
         total = len(self.rounds)
         title = f"战斗过程（共 {total} 回合）" if total else "战斗过程"
         screen.blit(get_font(14, bold=True).render(title, True, C_TEXT_DIM),
@@ -1130,19 +1489,25 @@ class Battle:
 
         end = total - self.scroll                        # 显示第 ... 到第 end 回合
         shown = self.rounds[max(0, end - self.HIST_ROWS):end]
+        multi = len(self.defenders) > 1                  # 两场时回合号要带上场次
         if total > self.HIST_ROWS:
-            tip = f"显示第 {shown[0]['no']}-{shown[-1]['no']} 回合 · 滚轮 / ↑↓ 翻看"
+            first, last = shown[0], shown[-1]
+            span = (f"{first['fight']}-{first['no']} ~ {last['fight']}-{last['no']}"
+                    if multi else f"{first['no']}-{last['no']}")
+            tip = f"显示第 {span} 回合 · 滚轮 / ↑↓ 翻看"
             tip_surf = get_font(12).render(tip, True, C_TEXT_DIM)
             screen.blit(tip_surf, tip_surf.get_rect(midright=(rect.right - 16, rect.top + 18)))
 
         font = get_font(14)
         x_round = rect.left + 16
-        x_atk = x_round + 104
+        x_atk = x_round + (136 if multi else 104)
         x_dfd = x_atk + (rect.right - 16 - x_atk) // 2
         y = rect.top + 38
         for record in shown:
-            screen.blit(font.render(f"第 {record['no']} 回合", True, C_TEXT_DIM), (x_round, y))
-            for gen, x in ((self.atk, x_atk), (self.dfd, x_dfd)):
+            label = (f"第 {record['fight']} 场·{record['no']} 回合" if multi
+                     else f"第 {record['no']} 回合")
+            screen.blit(font.render(label, True, C_TEXT_DIM), (x_round, y))
+            for gen, x in ((self.atk, x_atk), (record["dfd"], x_dfd)):
                 loss, hp = ((record["atk_loss"], record["atk_hp"]) if gen is self.atk else
                             (record["dfd_loss"], record["dfd_hp"]))
                 text = f"{gen.name}  -{loss}  体力剩 {hp}"
@@ -1153,7 +1518,12 @@ class Battle:
 
     def draw_controls(self, screen, mouse_pos):
         font = get_font(17, bold=True)
-        color = (255, 236, 160) if self.state == self.OVER else C_TEXT
+        if self.state == self.OVER:
+            color = (255, 236, 160)
+        elif self.state in (self.PICK_DEFENDER, self.RETREAT_PICK):
+            color = C_SELECT                   # 这两步要人做选择，字提亮一点
+        else:
+            color = C_TEXT
         y = self.HINT_Y
         for line in wrap_text(self.hint, font, WIN_W - 120)[:2]:
             surf = font.render(line, True, color)
@@ -1163,17 +1533,30 @@ class Battle:
             hover = rect.collidepoint(mouse_pos)
             pygame.draw.rect(screen, C_BTN_HOVER if hover else C_BTN, rect, border_radius=10)
             pygame.draw.rect(screen, self.button_accent(action), rect, 2, border_radius=10)
-            txt = get_font(16, bold=True).render(label, True, C_TEXT)
+            if action.startswith("retreat:"):     # 撤退选项格子小，字号跟着位置缩
+                font = fit_font(label, rect.width - 14, start=min(15, rect.height - 8),
+                                min_size=9)
+            else:
+                font = get_font(16, bold=True)
+            txt = font.render(label, True, C_TEXT)
             screen.blit(txt, txt.get_rect(center=rect.center))
-        foot = get_font(12).render(
-            "空格 / 回车 = 第一个按钮（交手、继续缠斗、返回战场）  ·  撤退请点按钮"
-            "  ·  滚轮 / ↑↓ 翻看战斗过程  ·  战斗中 ESC / R 不生效", True, C_TEXT_DIM)
+        if self.state == self.RETREAT_PICK:
+            foot_text = ("点一个落脚点撤退 · 括号里是这次撤退要透支的行动力，"
+                         "本回合累计不能超过 MOVE_POINTS"
+                         " · 这里按空格 / 回车不生效，免得误撤")
+        elif self.state == self.PICK_DEFENDER:
+            foot_text = ("点下方按钮决定谁先出阵 · 排在后面的那位会在前一位下场后接着打"
+                         " · 这里按空格 / 回车不生效，免得替你定顺序")
+        else:
+            foot_text = ("空格 / 回车 = 第一个按钮（交手、继续缠斗、返回战场）  ·  撤退请点按钮"
+                         "  ·  滚轮 / ↑↓ 翻看战斗过程  ·  战斗中 ESC / R 不生效")
+        foot = get_font(12).render(foot_text, True, C_TEXT_DIM)
         screen.blit(foot, foot.get_rect(center=(WIN_W // 2, self.FOOT_Y)))
 
     def button_accent(self, action):
-        if action in ("atk_retreat", "dfd_retreat"):
+        if action in ("atk_retreat", "dfd_retreat") or action.startswith("retreat:"):
             return C_WARN
-        if action == "roll":
+        if action == "roll" or action == "back" or action.startswith("pick:"):
             return C_GOLD
         return (86, 94, 112)
 
@@ -1227,8 +1610,8 @@ def show_config_error(exc):
 
     lines = wrap_text(f"配置有误：{exc}", font, 730)
     lines += [""]
-    lines += wrap_text(f"配置文件：{MAP_FILE}", font, 730)
-    lines += wrap_text(f"          {ROSTER_FILE}", font, 730)
+    for path in (MAP_FILE, ROSTER_FILE):
+        lines += wrap_text(f"配置文件：{path}", font, 730)
     lines += wrap_text("修好后重新运行程序即可。", font, 730)
 
     waiting = True
@@ -1250,8 +1633,8 @@ def main():
         game = Game()                         # 先确认配置没问题，再开窗口
     except ConfigError as exc:
         print(f"配置有误：{exc}", file=sys.stderr)
-        print(f"配置文件：{MAP_FILE}", file=sys.stderr)
-        print(f"          {ROSTER_FILE}", file=sys.stderr)
+        for path in (MAP_FILE, ROSTER_FILE):
+            print(f"配置文件：{path}", file=sys.stderr)
         show_config_error(exc)
         pygame.quit()
         sys.exit(1)
