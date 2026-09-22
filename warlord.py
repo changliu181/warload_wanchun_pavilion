@@ -34,7 +34,11 @@
           - 体力掉到 0 或以下即阵亡，同样算败方，也可能双方同归于尽。
         打完时双方剩多少体力，就是这场交战的伤害结算结果（不再有额外的伤害公式）；
         战果落回地图：败方让出这一格（攻方败则原地不动），阵亡的从棋盘上移除。
-* 胜负：一方武将全灭即败；回合数达到上限时按 存活武将*100 + 总体力 + 占据城池*50 比总分。
+* 胜负：一方武将全灭即败；回合数达到上限时按总分比较。总分 = 将领分 + 控制地域（含物品）分：
+    将领分 = 本方每名存活武将各算 (100 + 体力) × 武力，逐名求和；
+    控制地域分 = 每块可通行地域归**行动距离最近**的那一方（两边一样近算争夺中，谁也不算），
+    一格的分数 = 地形分（通路 200 / 城池 3000）+ 格上粮草每石 150。
+  侧边栏常驻一块比分板，实时显示双方的总分、将领分、地盘分。
 * 模式：启动时先选**一人游玩**（对抗电脑）还是**两人同机对战**；一人游玩还要选执蜀还是执魏，
   另一边交给电脑（见下面"电脑对手"一节）。按 R 会回到这个选择屏重选。
 
@@ -62,11 +66,12 @@ from ai import ai_pump
 from config import ConfigError, neighbors, parse_map, parse_roster, pick_spawns
 from constants import (
     AI, AI_STEP_FRAMES, BOARD, CELL, CELL_CAPACITY, CITY, CITY_DEFENSE_MULT,
-    DEPLOY_COUNT, FACTION_SHORT, FPS, GRAIN_EAT_MAX, GRAIN_HEAL, GRAIN_PER_CITY,
-    GRAIN_PER_STONE, GRID, GeneralSpec, HUMAN, LOSS_MAX_PER_MIGHT, MAP_FILE, MARGIN,
+    DEPLOY_COUNT, FACTION_SHORT, FPS, GRAIN_EAT_MAX, GRAIN_EVERY_TURNS, GRAIN_HEAL,
+    GRAIN_PER_CITY, GRAIN_PER_STONE, GRAIN_TURN_FIRST, GRID, GeneralSpec, HUMAN,
+    LOSS_MAX_PER_MIGHT, MAP_FILE, MARGIN,
     MAX_STAMINA, MOVE_POINTS, OBSTACLE, P1, P2, PLAYER_COLOR, PLAYER_COLOR_DARK,
-    PLAYER_NAME, REGEN, RETREAT_MAX, ROSTER_FILE, SIDEBAR, TERRAIN_NAME, TURN_LIMIT,
-    WIN_H, WIN_W,
+    PLAYER_NAME, REGEN, RETREAT_MAX, ROSTER_FILE, SCORE_GENERAL_BASE, SCORE_GRAIN,
+    SCORE_TERRAIN, SIDEBAR, TERRAIN_NAME, TURN_LIMIT, WIN_H, WIN_W,
     C_ATTACK, C_BG, C_BTN, C_BTN_HOVER, C_CITY, C_CITY_ALT, C_GOLD, C_GRAIN, C_GRAIN_BG,
     C_GRAIN_DIM, C_GRID, C_OBSTACLE, C_OBSTACLE_LINE, C_PANEL, C_PLACE, C_PLACE_CITY,
     C_PLAIN, C_PLAIN_ALT, C_SELECT, C_TEXT, C_TEXT_DIM, C_WARN,
@@ -339,12 +344,18 @@ class Game:
     # 调大要掂量：上阵人数多（DEPLOY_COUNT）时，总览会挤掉「最新动态」。
     ROSTER_MAX_ROWS = 7
 
-    # 侧边栏「选中武将」详情框的版面
+    # 侧边栏「选中武将」详情框的版面（右边并排一块同样高的「比分板」）
+    INFO_COL_GAP = 12       # 详情框与比分板之间的间距（两者平分侧边栏宽度）
     INFO_BOX_H = 118        # 框高：4 行文字（8/34/54/72）+ 底部一行吃粮按钮
     INFO_BTN_TOP = 90       # 按钮行的 y（相对框顶）；写死是为了不跟上面那行文字重叠
     INFO_BTN_W = 50         # 「吃粮」按钮宽
     INFO_BTN_H = 22
     INFO_BTN_GAP = 6
+
+    # 比分板的版面：标题（含"争夺中"）+ 一行双方阵营 + 总分/将领分/地盘分三行
+    SCORE_ROW_TOP = 50      # 第一行数字的 y（相对框顶）
+    SCORE_ROW_PITCH = 19
+    SCORE_LABEL_W = 54      # 左边名目那一列（总分 / 将领分 / 地盘分）
 
     SIDEBAR_X = MARGIN * 2 + BOARD   # 侧边栏左边界
 
@@ -577,11 +588,28 @@ class Game:
         """全场散落在格子上的粮草总数。"""
         return sum(self.grain.values())
 
+    def grain_turn(self):
+        """这一回合是不是"入库回合"：第 GRAIN_TURN_FIRST 回合起，每 GRAIN_EVERY_TURNS 个回合来一次。
+
+        默认落在 4 / 9 / 14 / 19 …（回合数 % 5 == 4），其余回合不产粮。
+        """
+        return self.turn % GRAIN_EVERY_TURNS == GRAIN_TURN_FIRST % GRAIN_EVERY_TURNS
+
+    def next_grain_turn(self):
+        """下一次城池入库在第几回合（入库发生在那个回合的**开头**）。
+
+        侧边栏拿它显示"下批粮草第 N 回合"，让玩家心里有数，不必自己数回合。
+        """
+        gap = (GRAIN_TURN_FIRST % GRAIN_EVERY_TURNS - self.turn) % GRAIN_EVERY_TURNS
+        return self.turn + (gap or GRAIN_EVERY_TURNS)
+
     def produce_grain(self):
-        """一方操作完毕：每座城池产 GRAIN_PER_CITY 石，堆在城池那一格上。
+        """入库回合：每座城池产 GRAIN_PER_CITY 石，堆在城池那一格上；平时什么都不做。
 
         城池归谁占着不影响产出——粮草没有归属，谁站上去谁就能取。
         """
+        if not self.grain_turn():
+            return 0
         made = 0
         for r in range(GRID):
             for c in range(GRID):
@@ -589,7 +617,8 @@ class Game:
                     self.add_grain(r, c, GRAIN_PER_CITY)
                     made += GRAIN_PER_CITY
         if made:
-            self.push_log(f"⚑ 各城池入库 {made} 石粮草，"
+            self.push_log(f"⚑ 各城池入库 {made} 石粮草"
+                          f"（每 {GRAIN_EVERY_TURNS} 回合一次），"
                           f"散落在野的共 {self.grain_stock()} 石。")
         return made
 
@@ -739,14 +768,14 @@ class Game:
             return
         self.clear_selection()
         self.grain_pick = None                # 换回合了，没选完的携带弹窗作废
-        # 回血和产粮都算"这一方操作完毕"的结算，放在切边之前，对着刚行动完的一方
+        # 回血算"这一方操作完毕"的结算，放在切边之前，对着刚行动完的一方
         self.regen_side(self.current)
-        self.produce_grain()
         self.current = 1 - self.current
         self.turn += 1
         if self.turn > TURN_LIMIT:
             self.finish_by_score()
             return
+        self.produce_grain()                  # 入库回合（4/9/14/…）才真的产，见 grain_turn
         self.start_turn()
         self.check_victory()
 
@@ -779,7 +808,11 @@ class Game:
             self.set_winner(P1, f"{PLAYER_NAME[P1]} 全歼敌军，获胜！")
 
     def finish_by_score(self):
-        s1, s2 = self.score(P1), self.score(P2)
+        """回合用尽：按总分（将领分 + 控制地域分）判胜负，双方各报一次账。"""
+        board, _contested = self.scoreboard()
+        s1, s2 = board[P1][0], board[P2][0]
+        self.push_log("回合用尽，结算比分：" + "；".join(
+            self.score_text(player, board) for player in (P1, P2)) + "。")
         if s1 > s2:
             self.set_winner(P1, f"回合用尽，{PLAYER_NAME[P1]} 以 {s1}:{s2} 获胜！")
         elif s2 > s1:
@@ -787,10 +820,87 @@ class Game:
         else:
             self.set_winner(None, f"回合用尽，{s1}:{s2} 平局！")
 
+    # ---------------- 计分 ----------------
+    def general_score(self, player):
+        """将领分：本方每名**存活**武将各算 (100 + 体力) × 武力，逐名求和。
+
+        阵亡的不再计分（体力已经是 0，人也从棋盘上消失了）。
+        """
+        return sum((SCORE_GENERAL_BASE + gen.stamina) * gen.might
+                   for gen in self.generals if gen.alive and gen.owner == player)
+
+    def territory_value(self, r, c):
+        """一块地域值多少分：地形分（通路 200 / 城池 3000）+ 格上粮草每石 150。"""
+        return SCORE_TERRAIN[self.grid[r][c]] + self.grain_at(r, c) * SCORE_GRAIN
+
+    def distance_field(self, player):
+        """这一方到各格的**行动距离**（步数）-> {格子: 步数}；到不了的不在表里。
+
+        多源 BFS：从这一方所有存活武将同时往外走，所以每一步都取"最近的那名武将"。
+        距离只在通路 / 城池上量（障碍得绕），**格上站着谁不影响**——这量的是
+        "这一方的兵要几步才能到这儿"，不是"现在谁能站上去"。
+        """
+        dist = {}
+        q = deque()
+        for gen in self.generals:
+            if gen.alive and gen.owner == player and gen.pos not in dist:
+                dist[gen.pos] = 0
+                q.append(gen.pos)
+        while q:
+            r, c = q.popleft()
+            step = dist[(r, c)] + 1
+            for nr, nc in neighbors(r, c):
+                if (nr, nc) in dist or self.grid[nr][nc] == OBSTACLE:
+                    continue
+                dist[(nr, nc)] = step
+                q.append((nr, nc))
+        return dist
+
+    def territory_scores(self):
+        """控制地域（含物品）分 -> ({玩家: 分}, 争夺中的格数)。
+
+        每一块可通行地域归**行动距离最近**的那一方（距离见 distance_field）。
+        两边一样近——包括双方都到不了——就算"争夺中"，谁也不算这一块。
+        障碍不是地盘，压根不参与判定。
+        """
+        fields = {player: self.distance_field(player) for player in (P1, P2)}
+        scores = {P1: 0, P2: 0}
+        contested = 0
+        for r in range(GRID):
+            for c in range(GRID):
+                if self.grid[r][c] == OBSTACLE:
+                    continue
+                d1 = fields[P1].get((r, c))
+                d2 = fields[P2].get((r, c))
+                if d1 is not None and (d2 is None or d1 < d2):
+                    owner = P1
+                elif d2 is not None and (d1 is None or d2 < d1):
+                    owner = P2
+                else:                                 # 一样近（含双方都到不了）：争夺中
+                    owner = None
+                if owner is None:
+                    contested += 1
+                else:
+                    scores[owner] += self.territory_value(r, c)
+        return scores, contested
+
+    def scoreboard(self):
+        """比分板上两个人的数 -> ({玩家: (总分, 将领分, 地盘分)}, 争夺中的格数)。"""
+        territory, contested = self.territory_scores()
+        board = {}
+        for player in (P1, P2):
+            gens = self.general_score(player)
+            board[player] = (gens + territory[player], gens, territory[player])
+        return board, contested
+
     def score(self, player):
-        gens = [g for g in self.generals if g.alive and g.owner == player]
-        cities = sum(1 for g in gens if self.grid[g.row][g.col] == CITY)
-        return len(gens) * 100 + sum(g.stamina for g in gens) + cities * 50
+        """这一方的总分 = 将领分 + 控制地域（含物品）分。"""
+        return self.scoreboard()[0][player][0]
+
+    def score_text(self, player, board):
+        """把一方的分数写成「蜀 12345（将领 9000 + 地盘 3345）」——战报结算用。"""
+        total, gens, land = board[player]
+        return f"{FACTION_SHORT[player]} {total}（将领 {gens} + 地盘 {land}）"
 
     def set_winner(self, player, text):
         """定下胜负：player 为 None 就是平局。两种情况下对局都算结束。"""
@@ -993,9 +1103,19 @@ class Game:
         y = MARGIN + 14 + 32                      # 标题
         return y + (30 if self.over else 22 + 30)  # 结束横幅 / 回合行 + 行动方行
 
+    def info_col_w(self):
+        """详情框 / 比分板一共并排两个，各占多宽（侧边栏宽度一分两半）。"""
+        return (SIDEBAR - 32 - self.INFO_COL_GAP) // 2
+
     def selected_box(self):
         return pygame.Rect(self.SIDEBAR_X + 16, self.info_top(),
-                           SIDEBAR - 32, self.INFO_BOX_H)
+                           self.info_col_w(), self.INFO_BOX_H)
+
+    def score_box(self):
+        """比分板：和选中武将详情并排在同一行，右半边。"""
+        width = self.info_col_w()
+        return pygame.Rect(self.SIDEBAR_X + 16 + width + self.INFO_COL_GAP, self.info_top(),
+                           width, self.INFO_BOX_H)
 
     def eat_buttons(self):
         """详情框底部那排「吃粮」按钮 -> [(文字, Rect, 石数)]；不能吃就是空表。"""
@@ -1020,8 +1140,9 @@ class Game:
         y += 32
 
         if not self.over:
-            screen.blit(get_font(13).render(f"第 {self.turn} / {TURN_LIMIT} 回合",
-                                            True, C_TEXT_DIM), (panel.left + 16, y))
+            # 回合数后面跟一句"下批粮草第几回合"：粮草是攒着等的，玩家得能预判
+            turn_line = f"第 {self.turn} / {TURN_LIMIT} 回合　·　下批粮草 第 {self.next_grain_turn()} 回合"
+            screen.blit(get_font(13).render(turn_line, True, C_TEXT_DIM), (panel.left + 16, y))
             y += 22
             dot = pygame.Rect(panel.left + 16, y + 4, 14, 14)
             pygame.draw.rect(screen, PLAYER_COLOR[self.current], dot, border_radius=4)
@@ -1039,7 +1160,9 @@ class Game:
             screen.blit(get_font(15, bold=True).render(label, True, C_TEXT), (panel.left + 16, y))
             y += 30
 
-        # 选中武将详情；顶边由 info_top() 定死，好吃粮按钮的命中矩形对得上
+        # 选中武将详情 + 比分板：并排一行，顶边由 info_top() 定死，
+        # 好吃粮按钮的命中矩形对得上
+        self.draw_score_board(screen, self.score_box())
         y = self.draw_selected_info(screen, panel, self.info_top())
 
         # 底部武将总览：**一栏一方并排**，栏高只看人多的一边——两边人数可以不一样多
@@ -1093,6 +1216,41 @@ class Game:
             pygame.draw.rect(screen, (214, 180, 96), box, 2, border_radius=8)
             screen.blit(surf, surf.get_rect(center=box.center))
 
+    def draw_score_board(self, screen, box):
+        """常驻比分板：双方的总分 / 将领分 / 地盘分（怎么算见 Game.scoreboard）。
+
+        和「选中武将详情」并排在同一行，一局自始至终挂着，谁领先一眼就能看出来。
+        左边一列是名目，右边两栏一人一边（左边红方、右边蓝方，和下面的武将总览一致）；
+        争夺中的格子谁也不算，所以在标题右边单独报一个数，免得两边地盘加起来对不上整张图。
+        """
+        board, contested = self.scoreboard()
+        pygame.draw.rect(screen, (42, 46, 58), box, border_radius=8)
+        pygame.draw.rect(screen, (86, 94, 112), box, 2, border_radius=8)
+        screen.blit(get_font(13, bold=True).render("比分", True, C_TEXT), (box.left + 12, box.top + 8))
+        if contested:
+            hint = get_font(10).render(f"争夺中 {contested} 格", True, C_TEXT_DIM)
+            screen.blit(hint, hint.get_rect(midright=(box.right - 10, box.top + 16)))
+
+        left = box.left + 12
+        col_w = (box.right - 10 - left - self.SCORE_LABEL_W) // 2
+        centers = [left + self.SCORE_LABEL_W + i * col_w + col_w // 2 for i in (0, 1)]
+
+        for i, player in enumerate((P1, P2)):       # 表头：一方一个小色块 + 阵营名
+            chip = pygame.Rect(0, 0, 10, 10)
+            chip.center = (centers[i] - 6, box.top + 38)
+            pygame.draw.rect(screen, PLAYER_COLOR[player], chip, border_radius=3)
+            name = get_font(11, bold=True).render(FACTION_SHORT[player], True, PLAYER_COLOR[player])
+            screen.blit(name, name.get_rect(midleft=(centers[i] + 1, box.top + 38)))
+
+        f_label = get_font(11)
+        f_value = get_font(11, bold=True)
+        for row, label in enumerate(("总分", "将领分", "地盘分")):
+            y = box.top + self.SCORE_ROW_TOP + row * self.SCORE_ROW_PITCH
+            screen.blit(f_label.render(label, True, C_TEXT_DIM), (left, y))
+            for i, player in enumerate((P1, P2)):
+                surf = f_value.render(str(board[player][row]), True, PLAYER_COLOR[player])
+                screen.blit(surf, surf.get_rect(midtop=(centers[i], y)))
+
     def draw_selected_info(self, screen, panel, y):
         gen = self.selected
         box = self.selected_box()
@@ -1115,15 +1273,19 @@ class Game:
         stamina = f"体力 {gen.stamina}/{gen.stamina_cap}"
         if gen.city_boost:
             stamina += "（守城中）"          # 加成期间上限临时抬高，标一下免得看着像出错
-        screen.blit(f_sm.render(
-            f"{stamina}   移动力 {gen.move_points}/{MOVE_POINTS}",
-            True, C_TEXT), (box.left + 12, box.top + 54))
+        move_txt = f"移动力 {gen.move_points}/{MOVE_POINTS}"
+        stamina_font = fit_font(f"{stamina}   {move_txt}", box.width - 24,
+                                start=12, min_size=9, bold=False)
+        screen.blit(stamina_font.render(f"{stamina}   {move_txt}", True, C_TEXT),
+                    (box.left + 12, box.top + 54))
         note = f"位于 {self.describe(gen.row, gen.col)}"
         if gen.exhausted:
             note += "  · 本回合已走完"
         elif self.compute_attackable(gen):
-            note += "  · 旁边有敌军，可踏进去交战"
-        screen.blit(f_sm.render(note, True, C_TEXT_DIM), (box.left + 12, box.top + 72))
+            note += "  · 可踏进去交战"
+        # 地名长短不一（「襄阳（城池）」到「濡须口（通路）」），窄框里用 fit_font 兜住
+        note_font = fit_font(note, box.width - 24, start=12, min_size=9, bold=False)
+        screen.blit(note_font.render(note, True, C_TEXT_DIM), (box.left + 12, box.top + 72))
 
         # 底部一行：吃粮按钮；吃不了但脚下有粮就写一句为什么
         buttons = self.eat_buttons()
