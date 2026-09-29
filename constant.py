@@ -24,8 +24,16 @@ TERRAIN_NAME = {OBSTACLE: "障碍", PLAIN: "通路", CITY: "城池"}
 TURN_LIMIT = 100         # 总回合数上限（双方各行动一次算 2 回合）
 MAX_STAMINA = 100
 MOVE_POINTS = 3         # 每回合移动力：最多走 3 格，每次一格（与体力无关）
+ATTACK_COST = 1         # 踏进敌格交战本身花几点移动力。把守军打光、就地进占，这就是全部花费
+ATK_RETREAT_COST = 1    # 攻方打了一半收手撤退，要在进攻那笔钱上**再加**几点
 CELL_CAPACITY = 2       # 同一格最多站几名同阵营武将（敌我永远不能同格）
 RETREAT_MAX = MOVE_POINTS   # 一次撤退最多退几格；同一回合累计撤退格数封顶 MOVE_POINTS
+
+# 撤退的两种算法不一样，别混：
+#   攻方撤退是"当场收手"——人在交战期间本来就没动窝，撤退只是白扔 ATTACK_COST + ATK_RETREAT_COST
+#   两点移动力，**不赊账**（攻方没有透支一说）。付不起 ATK_RETREAT_COST 时就没有撤退选项，
+#   只能接着缠斗；打赢了（守军清空、就地进占）则只花 ATTACK_COST。
+#   守方撤退是"真挪窝"——撤几格就**透支下回合几点**行动力（见 General.move_debt）。
 REGEN = {OBSTACLE: 0, PLAIN: 2, CITY: 3}
 
 # 分数：总分 = 将领分 + 控制地域分（侧边栏常驻一块比分板实时显示，见 Game.scoreboard）
