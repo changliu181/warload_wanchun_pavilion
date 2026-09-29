@@ -65,7 +65,8 @@ import pygame
 from ai import ai_pump
 from config import ConfigError, neighbors, parse_map, parse_roster, pick_spawns
 from constants import (
-    AI, AI_STEP_FRAMES, BOARD, CELL, CELL_CAPACITY, CITY, CITY_DEFENSE_MULT,
+    AI, AI_STEP_FRAMES, ATK_RETREAT_COST, ATTACK_COST, BOARD, CELL, CELL_CAPACITY,
+    CITY, CITY_DEFENSE_MULT,
     DEPLOY_COUNT, FACTION_SHORT, FPS, GRAIN_EAT_MAX, GRAIN_EVERY_TURNS, GRAIN_HEAL,
     GRAIN_PER_CITY, GRAIN_PER_STONE, GRAIN_TURN_FIRST, GRID, GeneralSpec, HUMAN,
     LOSS_MAX_PER_MIGHT, MAP_FILE, MARGIN,
@@ -146,8 +147,8 @@ class General:
         self.row = row
         self.col = col
         self.alive = True
-        self.move_points = MOVE_POINTS    # 本回合剩余移动力，每走相邻一格 -1（交战也 -1）
-        self.move_debt = 0                # 本回合累计撤退了几格 = 下回合要还的行动力
+        self.move_points = MOVE_POINTS    # 本回合剩余移动力，每走相邻一格 -1（进攻也 -1）
+        self.move_debt = 0                # 本回合守方撤退累计了几格 = 下回合要还的行动力
         self.city_boost = False           # 守城加成是否生效（只在一次交战期间为 True）
 
     @property
@@ -160,21 +161,22 @@ class General:
         return self.move_points <= 0
 
     def reset_turn(self):
-        """回合开始重置移动力：先扣掉上回合撤退透支的部分，不够扣就是 0。"""
+        """回合开始重置移动力：先扣掉上回合**守方撤退**透支的部分，不够扣就是 0。"""
         self.move_points = max(0, MOVE_POINTS - self.move_debt)
         self.move_debt = 0
 
     @property
     def retreat_room(self):
-        """这一回合还允许再撤几格：累计撤退格数封顶 MOVE_POINTS。
+        """**守方**这一回合还允许再撤几格：累计撤退格数封顶 MOVE_POINTS。
 
         退满之后就没得退了——不是"透支封顶"，而是那种撤退根本不允许，
         所以撤退选项里压根不会出现超过剩余额度的落脚点。
+        攻方撤退不走这条账（他是当场扣移动力、不赊账，见 Battle.can_retreat）。
         """
         return max(0, MOVE_POINTS - self.move_debt)
 
     def add_move_debt(self, steps):
-        """记一笔撤退透支（本回合累计撤退格数），下回合要还。
+        """记一笔**守方**撤退透支（本回合累计撤退格数），下回合要还。
 
         调用方必须先用 retreat_room 确认 steps 不超额度——这是一条规则，
         不是可以夹一下就算了的事。
@@ -737,16 +739,18 @@ class Game:
 
     # ---------------- 战斗 ----------------
     def charge(self, attacker, row, col):
-        """向相邻的敌方武将格发动进攻：花 1 点移动力，然后切到交战界面。
+        """向相邻的敌方武将格发动进攻：花 ATTACK_COST 点移动力，然后切到交战界面。
 
         这一格里可能有 1-2 名守将，谁先迎战由守方在交战界面里定；攻方得把他们
         一个个打完才能进占这一格。真正的胜负判定与伤害结算都在 Battle 那一屏上完成
         （结算结果直接体现在双方体力上），打完由 end_battle 回到地图。
         交战不结束该武将的行动：只要还有移动力，就能接着走、接着撞下一个人。
-        进攻方在交战期间不动窝——败了就是白花一点移动力。
+
+        这一笔只是"进攻"的钱。打退守军、就地进占，账就结清了；
+        要是半路收手撤退，得再补 ATK_RETREAT_COST 点（见 Battle.can_retreat）。
         """
         defenders = self.generals_at(row, col)
-        attacker.move_points = max(0, attacker.move_points - 1)
+        attacker.move_points = max(0, attacker.move_points - ATTACK_COST)
         self.clear_selection()                    # 交战期间棋盘不响应操作
         self.battle = Battle(self, attacker, defenders)
         self.push_log(f"⚔ {attacker.name} 进攻 {self.describe(row, col)}"
@@ -1362,7 +1366,11 @@ class Battle:
 
     撤退
     ----
-    * **攻方撤退**：只是回到出发格（攻方在交战期间本来就没动窝），不额外扣移动力。
+    * **进攻**本身花 ATTACK_COST 点移动力（踏进去就扣，见 Game.charge）。
+    * **攻方撤退**：人还是站在出发格不动，但要**再补 ATK_RETREAT_COST 点**移动力，
+      所以"打一半收手"总共花 ATTACK_COST + ATK_RETREAT_COST 点；守军被打光、就地进占
+      则只花 ATTACK_COST 点。攻方**不赊账**（没有透支一说）——手头不够这几点的，
+      界面上压根不给撤退按钮，只能接着缠斗（见 can_retreat）。
     * **守方撤退**：从争夺格做 BFS，挑一个落脚点撤过去，撤几格就**透支下回合几点行动力**。
       路径是 BFS 算出来的，**可以拐弯、不要求走直线**；约束是第一步不能迎着攻方来的方向，
       中途每格要过得去（通路/城池、无敌方），落脚那格还要停得下（己方不满 CELL_CAPACITY）。
@@ -1380,7 +1388,7 @@ class Battle:
                                               \\--> 都还活着 --> CHOOSE_ATK
         第二场: 直接从 CHOOSE_ATK 起手（第一回合前双方都能撤）
         CHOOSE_ATK --继续--> CHOOSE_DFD --继续--> 下一回合的 READY
-        CHOOSE_ATK --撤退--> OVER（攻方原地不动）
+        CHOOSE_ATK --撤退--> OVER（攻方原地不动，再补 ATK_RETREAT_COST 点）
         CHOOSE_DFD --撤退--> RETREAT_PICK --选好方向步数--> 换人 / 攻方进占
         OVER --返回战场--> 回到地图
     """
@@ -1523,8 +1531,9 @@ class Battle:
             self.settle_fight()
             return
         self.state = self.CHOOSE_ATK
-        self.hint = (f"第 {self.round} 回合结束，{self.atk.name}（攻方）先决定："
-                     f"继续缠斗，还是就此撤退？")
+        tail = ("继续缠斗，还是就此撤退？" if self.can_retreat()
+                else f"继续缠斗（手头不够 {ATK_RETREAT_COST} 点，撤不了）。")
+        self.hint = f"第 {self.round} 回合结束，{self.atk.name}（攻方）先决定：{tail}"
 
     def continue_fight(self):
         """选择继续：攻方选完轮到守方，两边都选继续就打下一回合（或第二场的第一回合）。"""
@@ -1633,17 +1642,29 @@ class Battle:
         return sorted(self.retreat_paths().items(), key=lambda kv: (kv[1], kv[0]))
 
     def can_retreat(self):
-        """当前该做决定的一方有没有撤退的权利：攻方永远有（原地退回），守方要有退路。"""
+        """当前该做决定的一方有没有撤退的权利。
+
+        攻方：撤退是"当场收手"，要再补 ATK_RETREAT_COST 点移动力，而且**不赊账**——
+              手头不够这几点的，连撤退按钮都不给，只能接着缠斗。
+              人本来就站在出发格没动窝，所以这笔账只是扣移动力，不涉及挪格子。
+        守方：得真有退路（retreat_paths 里有落脚点）才有撤退的权利。
+        """
         if self.chooser is self.atk:
-            return True
+            return self.atk.move_points >= ATK_RETREAT_COST
         return bool(self.retreat_paths())
 
     def request_retreat(self, gen):
-        """点了"撤退"：攻方直接原地退回，守方先挑撤到哪一格。"""
+        """点了"撤退"：攻方就地收手（补一笔移动力），守方先挑撤到哪一格。"""
         if gen is self.atk:
+            if gen.move_points < ATK_RETREAT_COST:
+                return                        # 付不起时本来就不给按钮，这里只是兜底
             self.atk_retreated = True
+            gen.move_points -= ATK_RETREAT_COST
             text = f"{self.atk.name} 撤退，判为败方；{self.dfd.name} 守住 {self.place}。"
-            self.game.push_log(f"⚔ {self.atk.name} 从 {self.place} 撤退，退回原地。")
+            self.game.push_log(
+                f"⚔ {self.atk.name} 从 {self.place} 撤退，退回原地"
+                f"（进攻 {ATTACK_COST} 点 + 撤退 {ATK_RETREAT_COST} 点，"
+                f"剩余移动力 {gen.move_points}）。")
             self.finish(text)
             return
         options = self.retreat_options()
@@ -1703,8 +1724,11 @@ class Battle:
         if self.state in (self.CHOOSE_ATK, self.CHOOSE_DFD):
             action = "atk_retreat" if self.state == self.CHOOSE_ATK else "dfd_retreat"
             options = [("继续缠斗", "hold")]
-            if self.can_retreat():            # 守方没退路时，连按钮都不给
-                options.append(("撤退（判负）", action))
+            # 退不了的一方连按钮都不给：守方是没退路，攻方是补不起那点移动力
+            if self.can_retreat():
+                label = (f"撤退（判负，再补 {ATK_RETREAT_COST} 点）"
+                         if self.state == self.CHOOSE_ATK else "撤退（判负）")
+                options.append((label, action))
             return [(label, self.button_rect(i, len(options)), act)
                     for i, (label, act) in enumerate(options)]
         if self.state == self.RETREAT_PICK:
@@ -1981,7 +2005,8 @@ class Battle:
                 font = fit_font(label, rect.width - 14, start=min(15, rect.height - 8),
                                 min_size=9)
             else:
-                font = get_font(16, bold=True)
+                # 攻方那个"撤退（判负，再补 N 点）"比别的按钮长，兜一下免得溢出
+                font = fit_font(label, rect.width - 14, start=16, min_size=9)
             txt = font.render(label, True, C_TEXT)
             screen.blit(txt, txt.get_rect(center=rect.center))
         if self.state == self.RETREAT_PICK:
