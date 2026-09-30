@@ -14,13 +14,13 @@
   （玩家二（魏）在北、玩家一（蜀）在南，两半场分界由 warlords.py 的 SPAWN_ROWS 决定）。
   地图上每格底部会写出地名，鼠标悬停还会弹出「地名（地形）」，
   选中武将和交战界面也都会写明所在地。改完地图保存后，在游戏里按 R 即可按新地图重开。
-* 武将写在同目录的 generals.txt 里，魏蜀各 10 名（武力/智力都是固定值）：每局开局时
-  每方从本方 10 名里随机抽几名上阵（人数各配各的，见 DEPLOY_COUNT），抽中的落本方半场。改完按 R 即可重开。
+* 武将写在同目录的 generals.txt 里，魏蜀各 20 名（武力/智力都是固定值）：每局开局时
+  每方从本方 20 名里随机抽几名上阵（人数各配各的，见 DEPLOY_COUNT），抽中的落本方半场。改完按 R 即可重开。
 * 每名武将的属性（都在 generals.txt 里配置）：
     - 武力 might     ：固定值，1-MAX_STAT，决定交战每回合掉多少体力（掉血只看对方武力）
-    - 智力 intellect ：固定值，1-MAX_STAT，目前只作展示，不参与计算
-    - 体力 stamina   ：可变值，上限 100。只有交战会消耗体力；
-                       每回合开始时按所在地形恢复（通路 +4 / 城池 +6）
+    - 智力 intellect ：固定值，1-MAX_STAT，决定计谋的成功率和效果
+    - 体力 stamina   ：可变值，上限 100。交战和计谋等多种情况会消耗体力；
+                       每回合结束时按所在地形恢复（通路 +2 / 城池 +3）
 * 移动：每名武将有 MOVE_POINTS 点移动力，回合开始时重置为 3，每挪到相邻一格花 1 点，
         所以一回合最多走 3 格。移动力与体力完全脱钩：移动不消耗体力，
         体力见底也能照走 3 格。
@@ -39,6 +39,12 @@
     控制地域分 = 每块可通行地域归**行动距离最近**的那一方（两边一样近算争夺中，谁也不算），
     一格的分数 = 地形分（通路 200 / 城池 3000）+ 格上粮草每石 150。
   侧边栏常驻一块比分板，实时显示双方的总分、将领分、地盘分。
+* 计谋：智力终于派上用场了。选中己方武将后点侧边栏的「用计」按钮，从四条计谋里挑一条：
+    暗度陈仓（跃过障碍） / 调虎离山（调走敌将） / 内讧（让两名敌将自相残杀） /
+    劫粮（把别处的粮搬到自己脚下）。
+  用一次的代价是 **1 点行动力 + 10 点体力**，而且用出去的那一刻就结清（成没成都照付），
+  所以弹窗里挑来挑去不花钱。成功率全看双方**智力差**（算式和系数见 stratagems.py /
+  constants.py），成不成都当场掷骰，战报里写得明明白白。
 * 模式：启动时先选**一人游玩**（对抗电脑）还是**两人同机对战**；一人游玩还要选执蜀还是执魏，
   另一边交给电脑（见下面"电脑对手"一节）。按 R 会回到这个选择屏重选。
 
@@ -52,6 +58,11 @@
 * 交战界面（单独一屏，键盘鼠标都归它管；战斗中 ESC / R 故意不生效）：
     鼠标点按钮交手 / 继续缠斗 / 撤退 / 返回战场；
     空格、回车 = 第一个按钮（不会误触"撤退"）；滚轮、↑↓、PageUp/PageDown 翻看战斗过程。
+* 计谋（选中己方武将后点侧边栏「用计」按钮）：
+    弹窗里 1~4 或鼠标点选一条计谋；ESC / 右键取消。
+    选完进入**瞄准态**，棋盘上高亮出可以点的目标，点一下就掷骰结算；
+    瞄准态按 ESC 收手（代价还没扣，等于没用）；内讧挑第二个人、调虎离山挑落脚点
+    这两步是"计谋已经成了"，不能反悔。
 """
 
 import math
@@ -72,11 +83,14 @@ from constants import (
     LOSS_MAX_PER_MIGHT, MAP_FILE, MARGIN,
     MAX_STAMINA, MOVE_POINTS, OBSTACLE, P1, P2, PLAYER_COLOR, PLAYER_COLOR_DARK,
     PLAYER_NAME, REGEN, RETREAT_MAX, ROSTER_FILE, SCORE_GENERAL_BASE, SCORE_GRAIN,
-    SCORE_TERRAIN, SIDEBAR, TERRAIN_NAME, TURN_LIMIT, WIN_H, WIN_W,
-    C_ATTACK, C_BG, C_BTN, C_BTN_HOVER, C_CITY, C_CITY_ALT, C_GOLD, C_GRAIN, C_GRAIN_BG,
+    SCORE_TERRAIN, SIDEBAR, STRATAGEM_MOVE_COST, STRATAGEM_RANGE, STRATAGEM_STAMINA_COST,
+    TERRAIN_NAME, TURN_LIMIT, WIN_H, WIN_W,
+    C_ATTACK, C_BG, C_BTN, C_BTN_HOVER, C_CITY, C_CITY_ALT, C_CUNNING, C_CUNNING_BG,
+    C_CUNNING_DIM, C_GOLD, C_GRAIN, C_GRAIN_BG,
     C_GRAIN_DIM, C_GRID, C_OBSTACLE, C_OBSTACLE_LINE, C_PANEL, C_PLACE, C_PLACE_CITY,
     C_PLAIN, C_PLAIN_ALT, C_SELECT, C_TEXT, C_TEXT_DIM, C_WARN,
 )
+import stratagems
 
 
 def round_half_up(value):
@@ -334,6 +348,322 @@ class GrainPick:
 
 
 # --------------------------------------------------------------------------
+# 计谋的界面：先挑计谋（CunningPick），再在棋盘上点目标（CunningAim）
+# --------------------------------------------------------------------------
+# 弹窗里"这一计现在使不出来"的原因，按计谋各写一句（点不动的时候总得说清楚为什么）
+_NO_TARGET_HINT = {
+    "sneak": "身边没有可跃的障碍（要隔一格障碍、正对面能落脚）",
+    "lure": f"{STRATAGEM_RANGE} 格内没有调得动的敌将（智力差不够，或他无路可调）",
+    "infight": f"{STRATAGEM_RANGE} 格内没有能挑拨的敌将（他边上凑不出第二个人）",
+    "raid": "场上没有别处的粮草可劫",
+}
+
+
+def cunning_block_reason(gen):
+    """现在为什么打不开用计弹窗；能开就返回 None。
+
+    只卡**代价**这两样，不卡"四条计谋有没有目标"——目标有没有是弹窗里逐条说的，
+    所以一个目标都没有时弹窗照样打得开（看得到原因才不至于瞎猜）。
+    """
+    if gen is None or not gen.alive:
+        return "先选一名己方武将"
+    if gen.move_points < STRATAGEM_MOVE_COST:
+        return f"行动力不够（用计要 {STRATAGEM_MOVE_COST} 点）"
+    if gen.stamina <= STRATAGEM_STAMINA_COST:
+        return f"体力不够（用计要 10 点以上，现在只剩 {gen.stamina}）"
+    return None
+
+
+class CunningPick:
+    """用计弹窗：四条计谋各占一行，写明成功率或"使不出来"的原因。
+
+    代价是在**瞄准态点了目标**那一刻才扣的，所以在这里挑来挑去不花钱。
+    一个目标都凑不出来的计谋画成暗色、点不动——省得白点一下才发现没处使。
+    """
+
+    BOX_W, BOX_H = 566, 394
+    ROW_TOP, ROW_H = 92, 62
+    ROW_GAP = 6
+
+    def __init__(self, game, gen):
+        self.game = game
+        self.gen = gen
+        self.rows = []
+        self.refresh()
+
+    def refresh(self):
+        """把四条计谋各自的目标和说明算好（弹窗期间局面不会变，所以只算这一遍）。"""
+        self.rows = []
+        for spec in stratagems.STRATAGEMS:
+            found = stratagems.targets(self.game, self.gen, spec.key)
+            self.rows.append((spec.key, spec.name, spec.blurb,
+                              self._status(spec.key, found), bool(found)))
+
+    def _status(self, key, found):
+        """这一行右边那截说明：有目标就报成功率（和目标数），没有就报为什么使不出来。"""
+        if not found:
+            return _NO_TARGET_HINT[key]
+        game, gen = self.game, self.gen
+        if key == "sneak":                      # 暗度陈仓不看目标，成功率是个定数
+            odds = f"{stratagems.chance_of(game, gen, key, next(iter(found.values()))):.0%}"
+            return f"成功率 {odds}　·　{len(found)} 个落点"
+        rates = [stratagems.chance_of(game, gen, key, target) for target in found.values()]
+        lo, hi = min(rates), max(rates)
+        odds = f"{lo:.0%}" if hi - lo < 1e-9 else f"{lo:.0%}～{hi:.0%}"
+        unit = "堆粮" if key == "raid" else "个目标"
+        return f"成功率 {odds}　·　{len(found)} {unit}"
+
+    # ---------------- 操作 ----------------
+    def box_rect(self):
+        return pygame.Rect(MARGIN + (BOARD - self.BOX_W) // 2,
+                           MARGIN + (BOARD - self.BOX_H) // 2,
+                           self.BOX_W, self.BOX_H)
+
+    def row_rect(self, index):
+        box = self.box_rect()
+        return pygame.Rect(box.left + 14, box.top + self.ROW_TOP + index * (self.ROW_H + self.ROW_GAP),
+                           box.width - 28, self.ROW_H)
+
+    def cancel_rect(self):
+        box = self.box_rect()
+        return pygame.Rect(box.centerx - 70, box.bottom - 46, 140, 32)
+
+    def pick(self, index):
+        """选中第 index 条计谋（点得动的才作数）。"""
+        key, _name, _blurb, _status, usable = self.rows[index]
+        if not usable:
+            return
+        self.game.start_cunning(key)
+
+    def handle_click(self, pos):
+        if self.cancel_rect().collidepoint(pos):
+            self.game.cunning = None
+            return
+        for i in range(len(self.rows)):
+            if self.row_rect(i).collidepoint(pos):
+                self.pick(i)
+                return
+
+    def handle_key(self, key):
+        """1~4 选计谋，ESC / 回车之外什么都不接。"""
+        index = {pygame.K_1: 0, pygame.K_2: 1, pygame.K_3: 2, pygame.K_4: 3,
+                 pygame.K_KP1: 0, pygame.K_KP2: 1, pygame.K_KP3: 2, pygame.K_KP4: 3}.get(key)
+        if index is not None:
+            self.pick(index)
+            return True
+        if key == pygame.K_ESCAPE:
+            self.game.cunning = None
+            return True
+        return False
+
+    # ---------------- 绘制 ----------------
+    def draw(self, screen, mouse_pos):
+        veil = pygame.Surface((BOARD, BOARD), pygame.SRCALPHA)
+        veil.fill((8, 8, 12, 150))            # 比粮草那个淡一点：挑计谋时得看得见棋盘
+        screen.blit(veil, (MARGIN, MARGIN))
+        box = self.box_rect()
+        pygame.draw.rect(screen, C_PANEL, box, border_radius=12)
+        pygame.draw.rect(screen, C_CUNNING, box, 2, border_radius=12)
+
+        title = get_font(21, bold=True).render(f"用计 · {self.gen.name}", True, C_CUNNING)
+        screen.blit(title, title.get_rect(midtop=(box.centerx, box.top + 14)))
+        cost = get_font(12).render(
+            f"智力 {self.gen.intellect}　·　代价 {STRATAGEM_MOVE_COST} 点行动力 + "
+            f"{STRATAGEM_STAMINA_COST} 点体力（选定目标时结算，成没成都照付）",
+            True, C_TEXT_DIM)
+        screen.blit(cost, cost.get_rect(midtop=(box.centerx, box.top + 44)))
+        line = get_font(11).render(
+            f"现在：行动力 {self.gen.move_points}/{MOVE_POINTS}　体力 {self.gen.stamina}",
+            True, C_TEXT_DIM)
+        screen.blit(line, line.get_rect(midtop=(box.centerx, box.top + 66)))
+
+        for i, (_key, name, blurb, status, usable) in enumerate(self.rows):
+            rect = self.row_rect(i)
+            hover = rect.collidepoint(mouse_pos) and usable
+            pygame.draw.rect(screen, C_CUNNING_BG if (hover or usable) else (38, 38, 46),
+                             rect, border_radius=8)
+            pygame.draw.rect(screen, C_CUNNING if usable else (62, 62, 72),
+                             rect, 1, border_radius=8)
+            num = get_font(13, bold=True).render(str(i + 1), True,
+                                                 C_CUNNING if usable else C_CUNNING_DIM)
+            screen.blit(num, num.get_rect(center=(rect.left + 20, rect.centery)))
+            name_color = C_TEXT if usable else (122, 124, 136)
+            screen.blit(get_font(15, bold=True).render(name, True, name_color),
+                        (rect.left + 40, rect.top + 8))
+            screen.blit(get_font(11).render(blurb, True, C_TEXT_DIM),
+                        (rect.left + 40, rect.top + 32))
+            # 右边那截：成功率亮一点，使不出来的原因用计谋自己的暗紫色
+            color = C_CUNNING if usable else C_CUNNING_DIM
+            font = fit_font(status, rect.width - 240, start=12, min_size=9, bold=False)
+            screen.blit(font.render(status, True, color),
+                        font.render(status, True, color).get_rect(
+                            midright=(rect.right - 12, rect.centery)))
+
+        rect = self.cancel_rect()
+        hover = rect.collidepoint(mouse_pos)
+        pygame.draw.rect(screen, C_BTN_HOVER if hover else C_BTN, rect, border_radius=8)
+        pygame.draw.rect(screen, (86, 94, 112), rect, 1, border_radius=8)
+        txt = get_font(13, bold=True).render("取消 (ESC)", True, C_TEXT)
+        screen.blit(txt, txt.get_rect(center=rect.center))
+
+
+class CunningAim:
+    """用计的瞄准态：挑完计谋之后，在棋盘上点目标。
+
+    三个小状态：
+        target  —— 点这一计的对象（落点 / 敌将 / 有粮的格）。**代价在这一刻结算**：
+                   点下去就扣 1 点行动力 + 10 点体力，然后当场掷骰。
+        partner —— 内讧得手了：再点一名敌将，让他和中计的那位自相残杀
+        lure    —— 调虎离山得手了：给中计的敌将挑个落脚点（走几格是掷出来的，走到哪由你定）
+
+    后面两个状态是"计谋已经成了，把结果摆完"，所以按 ESC 不生效——泼出去的水收不回来。
+    ESC 只在 target 阶段管用，那时代价还没扣，等于当没点过。
+    """
+
+    def __init__(self, game, gen, key):
+        self.game = game
+        self.gen = gen
+        self.key = key
+        self.state = "target"
+        self.foe = None                   # 中计的敌将（调虎离山 / 内讧）
+        self.steps = 0                    # 调虎离山掷出来的调动格数
+        self.options = {}
+        self.refresh()
+
+    # ---------------- 状态 ----------------
+    def refresh(self):
+        """按当前状态重算可点的目标 -> {(行,列): 载荷}。"""
+        if self.state == "target":
+            self.options = stratagems.targets(self.game, self.gen, self.key)
+        elif self.state == "partner":
+            self.options = stratagems.infight_partners(self.game, self.foe)
+        elif self.state == "lure":
+            self.options = stratagems.lure_dests(self.game, self.foe, self.steps)
+
+    def highlight(self):
+        """棋盘上要高亮的格子。"""
+        return set(self.options)
+
+    def hint(self):
+        """提示条那一句话。"""
+        name = stratagems.name_of(self.key)
+        if self.state == "target":
+            what = {"sneak": "点一个能落下的格子（跃过紧邻的障碍）",
+                    "lure": f"点一名 {STRATAGEM_RANGE} 格内的敌将",
+                    "infight": f"点一名 {STRATAGEM_RANGE} 格内的敌将",
+                    "raid": "点一处有粮草的格子"}[self.key]
+            lead = f"「{name}」：{what}"
+        elif self.state == "partner":
+            lead = f"「{name}」得手：再点一名敌将（和 {self.foe.name} 同格或相邻），让他俩打起来"
+        else:
+            lead = (f"「{name}」得手：{self.foe.name} 会被牵着走 {self.steps} 格以内，"
+                    f"点一个落脚点")
+        tail = "　·　ESC 收手" if self.state == "target" else "　·　这一计已经成了，必须选一个"
+        return lead + tail
+
+    # ---------------- 点棋盘 ----------------
+    def handle_click(self, row, col):
+        cell = (row, col)
+        if cell not in self.options:
+            return
+        if self.state == "target":
+            self._aim(cell, self.options[cell])
+        elif self.state == "partner":
+            partner = stratagems.pick_partner(self.options[cell])
+            stratagems.apply_infight(self.game, self.foe, partner)
+            self._done(f"{self.foe.name} 与 {partner.name} 自相残杀")
+        elif self.state == "lure":
+            steps = self.options[cell]
+            stratagems.apply_lure(self.game, self.foe, cell, steps)
+            self._done(f"{self.foe.name} 被调往 {self.game.describe(*cell)}")
+
+    def _aim(self, cell, target):
+        """点定了目标：先结代价，再掷骰，最后按计谋各自的效果走。"""
+        game, gen, key = self.game, self.gen, self.key
+        if not stratagems.cost_ok(gen):                  # 兜底：局面变了就使不出来
+            self._abort("代价不够了")
+            return
+        stratagems.pay(gen)
+        rate = stratagems.chance_of(game, gen, key, target)
+        roll = game.rng.random()
+        name = stratagems.name_of(key)
+        got = roll < rate
+        game.push_log(f"🎴 {gen.name} 对 {game.describe(*cell)} 用「{name}」："
+                      f"成功率 {rate * 100:.0f}%，掷出 {roll * 100:.0f}"
+                      + ("—— 得手！" if got else "—— 失手。"))
+        if not got:
+            self._done(f"{name}失手")
+            return
+        if key == "sneak":
+            stratagems.apply_sneak(game, gen, cell)
+            self._done(f"暗度陈仓得手，{gen.name} 跃入 {game.describe(*cell)}")
+        elif key == "raid":
+            amount = stratagems.apply_raid(game, gen, cell)
+            self._done(f"劫粮得手，搬回 {amount} 石")
+        elif key == "infight":
+            self._to_partner(target)
+        elif key == "lure":
+            self._to_lure(target)
+
+    def _to_partner(self, target):
+        """内讧掷中了：转到"挑第二个人"。"""
+        self.foe = target.foe
+        self.state = "partner"
+        self.refresh()
+        if not self.options:                             # 选目标时就滤过了，这里只是兜底
+            self._done("内讧落空：边上没人可挑拨")
+
+    def _to_lure(self, target):
+        """调虎离山掷中了：先定这次能调几格，再让用计方挑落脚点。"""
+        game, gen = self.game, self.gen
+        self.foe = target.foe
+        cap = stratagems.lure_move_cap(gen.intellect, target.foe_int)
+        self.steps = game.rng.randint(1, cap) if cap >= 1 else 0
+        self.state = "lure"
+        self.refresh()
+        if not self.options:                             # 掷出来的格数太小，走不到任何落脚点
+            game.push_log(f"🎴 {self.foe.name} 中了计却无处可去（只调 {self.steps} 格），"
+                          f"这一计白费。")
+            self._done("调虎离山扑空：敌人无处可去")
+
+    def cancel(self):
+        """ESC：只有还没扣代价的 target 阶段能收手。"""
+        if self.state != "target":
+            return False
+        self.game.aim = None
+        return True
+
+    # ---------------- 收场 ----------------
+    def _abort(self, text):
+        self.game.aim = None
+        self.game.flash(text)
+
+    def _done(self, banner):
+        """计谋结算完毕：关掉瞄准态，刷新选中武将的可走范围，报一句。"""
+        game, gen = self.game, self.gen
+        game.aim = None
+        game.check_victory()                             # 内讧可能打死人
+        if gen.alive:
+            game.select(gen)                             # 行动力变了，可走范围跟着变
+        else:
+            game.clear_selection()
+        game.flash(banner)
+
+    # ---------------- 绘制 ----------------
+    def draw(self, screen, mouse_pos):
+        """棋盘下沿那条提示条（棋盘上的高亮由 draw_board 一起画）。"""
+        text = self.hint()
+        font = fit_font(text, BOARD - 40, start=14, min_size=10, bold=False)
+        surf = font.render(text, True, (238, 230, 250))
+        box = surf.get_rect(midbottom=(MARGIN + BOARD // 2, MARGIN + BOARD - 14)).inflate(28, 14)
+        bg = pygame.Surface(box.size, pygame.SRCALPHA)
+        bg.fill((22, 16, 32, 214))
+        screen.blit(bg, box.topleft)
+        pygame.draw.rect(screen, C_CUNNING, box, 2, border_radius=8)
+        screen.blit(surf, surf.get_rect(center=box.center))
+
+
+# --------------------------------------------------------------------------
 # 游戏主体
 # --------------------------------------------------------------------------
 class Game:
@@ -348,11 +678,12 @@ class Game:
 
     # 侧边栏「选中武将」详情框的版面（右边并排一块同样高的「比分板」）
     INFO_COL_GAP = 12       # 详情框与比分板之间的间距（两者平分侧边栏宽度）
-    INFO_BOX_H = 118        # 框高：4 行文字（8/34/54/72）+ 底部一行吃粮按钮
-    INFO_BTN_TOP = 90       # 按钮行的 y（相对框顶）；写死是为了不跟上面那行文字重叠
+    INFO_BOX_H = 146        # 框高：4 行文字（8/34/54/72）+ 两行按钮（吃粮 / 用计）
+    INFO_BTN_TOP = 90       # 第一排按钮（吃粮）的 y（相对框顶）
     INFO_BTN_W = 50         # 「吃粮」按钮宽
     INFO_BTN_H = 22
     INFO_BTN_GAP = 6
+    INFO_BTN2_TOP = 116     # 第二排按钮（用计）的 y（相对框顶）
 
     # 比分板的版面：标题（含"争夺中"）+ 一行双方阵营 + 总分/将领分/地盘分三行
     SCORE_ROW_TOP = 50      # 第一行数字的 y（相对框顶）
@@ -388,6 +719,8 @@ class Game:
         self.battle = None                # 正在进行的交战（Battle），非 None 时是交战界面
         self.grain = {}                   # {(行,列): 石数}；堆在格子上的**公共**粮草，无归属
         self.grain_pick = None            # 移动时问"带多少粮"的弹窗；None = 没在问
+        self.cunning = None               # 用计弹窗（CunningPick）；None = 没打开
+        self.aim = None                   # 用计的瞄准态（CunningAim）；None = 没在瞄准
         self.roster_scroll = 0            # 武将总览滚到第几行开始显示（人多时才有用）
         self.ai_timer = AI_STEP_FRAMES    # 电脑下一步还要等几帧
         self.push_log("新的一局开始，玩家一先行。")
@@ -435,7 +768,7 @@ class Game:
         return parse_roster(Path(path) if path else ROSTER_FILE)
 
     def create_generals(self):
-        """每方从本方 10 名里随机抽 DEPLOY_COUNT 名上阵，落到分好的出生点上。
+        """每方从本方 20 名里随机抽 DEPLOY_COUNT 名上阵，落到分好的出生点上。
 
         两边的上阵人数各配各的（DEPLOY_COUNT[P1] / [P2]），可以不一样多。
         抽将和出生点都用 self.rng，所以按 R 重开会重新抽将、重新站位。
@@ -772,6 +1105,7 @@ class Game:
             return
         self.clear_selection()
         self.grain_pick = None                # 换回合了，没选完的携带弹窗作废
+        self.drop_cunning()                   # 没点完的用计瞄准态也作废
         # 回血算"这一方操作完毕"的结算，放在切边之前，对着刚行动完的一方
         self.regen_side(self.current)
         self.current = 1 - self.current
@@ -935,8 +1269,12 @@ class Game:
         screen.fill(C_BG)
         self.draw_board(screen, mouse_pos)
         self.draw_sidebar(screen, mouse_pos, buttons)
+        if self.aim is not None:              # 瞄准态的提示条，压在棋盘下沿
+            self.aim.draw(screen, mouse_pos)
         if self.grain_pick is not None:       # 携带粮草的弹窗压在最上面
             self.grain_pick.draw(screen, mouse_pos)
+        if self.cunning is not None:          # 用计弹窗在最顶层
+            self.cunning.draw(screen, mouse_pos)
 
     def hovered_cell(self, mouse_pos):
         """鼠标落在棋盘上就是 (行, 列)，否则 None。"""
@@ -971,6 +1309,10 @@ class Game:
         for (r, c) in self.attackable:                # 能进攻的格子：进攻色压淡
             x, y = c * CELL, r * CELL
             pygame.draw.rect(overlay, (*C_ATTACK, 70), (x, y, CELL, CELL))
+        if self.aim is not None:                      # 用计的可点目标：计谋色（紫）压淡
+            for (r, c) in self.aim.highlight():
+                x, y = c * CELL, r * CELL
+                pygame.draw.rect(overlay, (*C_CUNNING, 96), (x, y, CELL, CELL))
         screen.blit(overlay, (MARGIN, MARGIN))
 
         # --- 武将（同格站两名时左右分栏）---
@@ -1133,6 +1475,38 @@ class Game:
                              self.INFO_BTN_W, self.INFO_BTN_H),
                  n)
                 for i, n in enumerate(amounts)]
+
+    # ---------------- 计谋（规则见 stratagems.py） ----------------
+    def cunning_button(self):
+        """详情框第二排那颗「用计」按钮 -> Rect；没选中武将就没有。"""
+        gen = self.selected
+        if not gen or not gen.alive:
+            return None
+        box = self.selected_box()
+        return pygame.Rect(box.left + 12, box.top + self.INFO_BTN2_TOP,
+                           box.width - 24, self.INFO_BTN_H)
+
+    def open_cunning(self):
+        """点「用计」：开弹窗。付不起代价就只报一句为什么，不开。"""
+        gen = self.selected
+        block = cunning_block_reason(gen)
+        if block:
+            self.flash(block)
+            return False
+        self.cunning = CunningPick(self, gen)
+        return True
+
+    def start_cunning(self, key):
+        """弹窗里挑定了某一计：关弹窗，进瞄准态（代价还没扣，点了目标才算数）。"""
+        gen = self.cunning.gen
+        self.cunning = None
+        self.aim = CunningAim(self, gen, key)
+        return True
+
+    def drop_cunning(self):
+        """把用计相关的弹窗/瞄准态一并收掉（换回合、重开时用）。"""
+        self.cunning = None
+        self.aim = None
 
     def draw_sidebar(self, screen, mouse_pos, buttons):
         x0 = MARGIN * 2 + BOARD
@@ -1302,6 +1676,18 @@ class Game:
             pygame.draw.rect(screen, C_GRAIN, rect, 1, border_radius=6)
             txt = get_font(11, bold=True).render(label, True, C_GRAIN)
             screen.blit(txt, txt.get_rect(center=rect.center))
+
+        # 第二行：用计。付不起代价就画成暗色，点了只报一句为什么（见 Game.open_cunning）
+        rect = self.cunning_button()
+        block = cunning_block_reason(gen)
+        hover = rect.collidepoint(pygame.mouse.get_pos()) and not block
+        pygame.draw.rect(screen, C_BTN_HOVER if hover else C_CUNNING_BG, rect, border_radius=6)
+        pygame.draw.rect(screen, C_CUNNING_DIM if block else C_CUNNING, rect, 1, border_radius=6)
+        label = (f"用计（{STRATAGEM_MOVE_COST} 行动力 + {STRATAGEM_STAMINA_COST} 体力）"
+                 if not block else f"用计 · {block}")
+        font = fit_font(label, rect.width - 12, start=11, min_size=9, bold=True)
+        txt = font.render(label, True, C_CUNNING_DIM if block else C_CUNNING)
+        screen.blit(txt, txt.get_rect(center=rect.center))
         return box.bottom + 12
 
     def draw_roster(self, screen, col, player, start, visible):
@@ -2196,6 +2582,21 @@ def play_match(screen, clock, game, buttons):
                         pick.act("cancel")        # 这一步当作没走，武将继续选着
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     pick.handle_click(event.pos)
+            elif game.cunning is not None:
+                # 用计弹窗：键盘鼠标都归它管，挑定计谋（或取消）才回到棋盘。
+                if event.type == pygame.KEYDOWN:
+                    game.cunning.handle_key(event.key)
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    game.cunning.handle_click(event.pos)
+            elif game.aim is not None:
+                # 用计瞄准态：点棋盘上的目标才结算；ESC 只在还没扣代价时管用
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    game.aim.cancel()
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    mx, my = event.pos
+                    board_x, board_y = mx - MARGIN, my - MARGIN
+                    if 0 <= board_x < BOARD and 0 <= board_y < BOARD:
+                        game.aim.handle_click(board_y // CELL, board_x // CELL)
             elif event.type == pygame.MOUSEWHEEL:
                 # 滚轮翻武将总览：鼠标得在总览那块上，免得跟别处的手感打架
                 if game.roster_rect(buttons).collidepoint(pygame.mouse.get_pos()):
@@ -2225,6 +2626,11 @@ def play_match(screen, clock, game, buttons):
                 elif hit_button == "quit":
                     running = False
                 elif game.human_may_act():
+                    # 「用计」按钮也在详情框里，先试它
+                    cunning = game.cunning_button()
+                    if cunning is not None and cunning.collidepoint(mx, my):
+                        game.open_cunning()
+                        continue
                     # 「吃粮」按钮长在选中武将详情框里，先试它，再交给棋盘
                     eat = next((n for _l, rect, n in game.eat_buttons()
                                 if rect.collidepoint(mx, my)), None)
