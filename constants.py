@@ -150,7 +150,7 @@ ROSTER_SIZE = 20                  # generals.txt 里每方应有 20 名武将
 # 开局每方从本方 20 名里随机抽几名上阵：双方各配各的，不要求一样多。
 # 上限是 ROSTER_SIZE；改大要考虑两件事——本方半场得放得下（validate_map 会拦），
 # 以及侧边栏的武将总览够不够显示（见 Game.ROSTER_MAX_ROWS，超过就靠滚轮翻）。
-DEPLOY_COUNT = {P1: 10, P2: 16}
+DEPLOY_COUNT = {P1: 13, P2: 13}
 FACTION_PLAYER = {"蜀": P1, "魏": P2}   # 配置里的阵营 -> 玩家
 
 # 配置里的一名武将：姓名 + 固定武力/智力（体力是每局开始时满值）
