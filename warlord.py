@@ -1,68 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-三国战棋 —— 10x10 格子地图上的双人回合制对战小游戏（Pygame）
+三国战棋 —— 10x10 格子地图上的回合制对战小游戏（Pygame）
 
-规则概要
---------
-* 地图 10x10，每格一种地形：障碍(不可通行) / 通路 / 城池(可通行，驻守回血更多)
-  地形用整数枚举定义，以后想加第 4 种（如"树林"）只需在 TERRAIN_* 后面追加并把
-  TERRAIN_NAME / REGEN 里补一条即可。
-* 地图不做随机生成，固定写在与本文件同目录的 map.txt 里：10 行 x 10 列、正好 10 座城池。
-  每一格写成「地形:地名」（如 .:樊城 / C:襄阳），障碍格只写 #——地形和地名在同一个文件里，
-  不再分两个文件，也就不存在"两份配置对不上"这回事；出生点不写进地图，
-  开局时每方上阵的武将随机落在自己半场的通路或城池上
-  （玩家二（魏）在北、玩家一（蜀）在南，两半场分界由 warlords.py 的 SPAWN_ROWS 决定）。
-  地图上每格底部会写出地名，鼠标悬停还会弹出「地名（地形）」，
-  选中武将和交战界面也都会写明所在地。改完地图保存后，在游戏里按 R 即可按新地图重开。
-* 武将写在同目录的 generals.txt 里，魏蜀各 20 名（武力/智力都是固定值）：每局开局时
-  每方从本方 20 名里随机抽几名上阵（人数各配各的，见 DEPLOY_COUNT），抽中的落本方半场。改完按 R 即可重开。
-* 每名武将的属性（都在 generals.txt 里配置）：
-    - 武力 might     ：固定值，1-MAX_STAT，决定交战每回合掉多少体力（掉血只看对方武力）
-    - 智力 intellect ：固定值，1-MAX_STAT，决定计谋的成功率和效果
-    - 体力 stamina   ：可变值，上限 100。交战和计谋等多种情况会消耗体力；
-                       每回合结束时按所在地形恢复（通路 +2 / 城池 +3）
-* 移动：每名武将有 MOVE_POINTS 点移动力，回合开始时重置为 3，每挪到相邻一格花 1 点，
-        所以一回合最多走 3 格。移动力与体力完全脱钩：移动不消耗体力，
-        体力见底也能照走 3 格。
-* 回合制：双方轮流行动；只要移动力还没花完，这名武将就能继续行动（继续走或继续交战），
-        移动力花完了本回合才动不了。
-* 交战：把己方武将的移动目标点成"相邻的敌方武将格子"（踏进去）即触发交战，消耗 1 点移动力。
-        必须从相邻格踏入，不能隔着格子冲锋。
-        交战时切到**单独的一屏**（Battle），打一场至少 1 回合、可主动撤退的单挑：
-          - 每回合双方同时掉体力，掉多少只看对方武力，取 [1, 2*对方武力] 里的随机整数；
-          - 每回合结束时双方都能选择撤退，由攻方先选，撤退的一方算败方；
-          - 体力掉到 0 或以下即阵亡，同样算败方，也可能双方同归于尽。
-        打完时双方剩多少体力，就是这场交战的伤害结算结果（不再有额外的伤害公式）；
-        战果落回地图：败方让出这一格（攻方败则原地不动），阵亡的从棋盘上移除。
-* 胜负：一方武将全灭即败；回合数达到上限时按总分比较。总分 = 将领分 + 控制地域（含物品）分：
-    将领分 = 本方每名存活武将各算 (100 + 体力) × 武力，逐名求和；
-    控制地域分 = 每块可通行地域归**行动距离最近**的那一方（两边一样近算争夺中，谁也不算），
-    一格的分数 = 地形分（通路 200 / 城池 3000）+ 格上粮草每石 150。
-  侧边栏常驻一块比分板，实时显示双方的总分、将领分、地盘分。
-* 计谋：智力终于派上用场了。选中己方武将后点侧边栏的「用计」按钮，从四条计谋里挑一条：
-    暗度陈仓（跃过障碍） / 调虎离山（调走敌将） / 内讧（让两名敌将自相残杀） /
-    劫粮（把别处的粮搬到自己脚下）。
-  用一次的代价是 **1 点行动力 + 10 点体力**，而且用出去的那一刻就结清（成没成都照付），
-  所以弹窗里挑来挑去不花钱。成功率全看双方**智力差**（算式和系数见 stratagems.py /
-  constants.py），成不成都当场掷骰，战报里写得明明白白。
-* 模式：启动时先选**一人游玩**（对抗电脑）还是**两人同机对战**；一人游玩还要选执蜀还是执魏，
-  另一边交给电脑（见下面"电脑对手"一节）。按 R 会回到这个选择屏重选。
+游戏本体：武将、对局规则、交战结算、绘制与主循环。constants.py 常量与配色，
+config.py 解析 map.txt / generals.txt，stratagems.py 管计谋，ai.py 是电脑对手。
 
-操作
-----
-* 鼠标左键：点高亮格移动（走到那儿，己方已经站了一人也照样能走过去）/
-  点自己的武将换选（同一格有两人就轮着选，轮完再点一下取消选中）/
-  点相邻的敌人格子发动进攻 / 点侧边栏按钮
-* 空格 或 回车：结束回合
-* R：回到模式选择屏重开一局（重新读取 map.txt / generals.txt，重新抽将）      ESC：退出
-* 交战界面（单独一屏，键盘鼠标都归它管；战斗中 ESC / R 故意不生效）：
-    鼠标点按钮交手 / 继续缠斗 / 撤退 / 返回战场；
-    空格、回车 = 第一个按钮（不会误触"撤退"）；滚轮、↑↓、PageUp/PageDown 翻看战斗过程。
-* 计谋（选中己方武将后点侧边栏「用计」按钮）：
-    弹窗里 1~4 或鼠标点选一条计谋；ESC / 右键取消。
-    选完进入**瞄准态**，棋盘上高亮出可以点的目标，点一下就掷骰结算；
-    瞄准态按 ESC 收手（代价还没扣，等于没用）；内讧挑第二个人、调虎离山挑落脚点
-    这两步是"计谋已经成了"，不能反悔。
+装好 pygame 后 python warlords.py 即可运行；规则、操作与界面的说明见 README.md。
 """
 
 import math
@@ -96,8 +39,8 @@ import stratagems
 def round_half_up(value):
     """四舍五入取整。
 
-    不能用内置 round：它是"银行家舍入"（round(2.5) == 2），
-    守城加成乘 1.2 再除 1.2 要靠两次取整精确还原，必须统一按"见五进一"。
+    不能用内置 round：它是"银行家舍入"（round(2.5) == 2），而守城加成乘 1.2 再除 1.2
+    要靠两次取整精确还原，必须统一按"见五进一"。
     """
     return int(math.floor(value + 0.5))
 
@@ -181,20 +124,14 @@ class General:
 
     @property
     def retreat_room(self):
-        """**守方**这一回合还允许再撤几格：累计撤退格数封顶 MOVE_POINTS。
+        """**守方**这一回合还允许再撤几格（累计撤退格数封顶 MOVE_POINTS）。
 
-        退满之后就没得退了——不是"透支封顶"，而是那种撤退根本不允许，
-        所以撤退选项里压根不会出现超过剩余额度的落脚点。
-        攻方撤退不走这条账（他是当场扣移动力、不赊账，见 Battle.can_retreat）。
+        超额度的落脚点不算合法，不会列出来；攻方撤退不走这条账（见 can_retreat）。
         """
         return max(0, MOVE_POINTS - self.move_debt)
 
     def add_move_debt(self, steps):
-        """记一笔**守方**撤退透支（本回合累计撤退格数），下回合要还。
-
-        调用方必须先用 retreat_room 确认 steps 不超额度——这是一条规则，
-        不是可以夹一下就算了的事。
-        """
+        """记一笔**守方**撤退透支，下回合要还（调用方须先确认 steps 不超 retreat_room）。"""
         self.move_debt += steps
 
     # ---------------- 体力 ----------------
@@ -206,7 +143,7 @@ class General:
         return self.max_stamina
 
     def apply_city_boost(self):
-        """守城加成：开打前把体力抬高 20%（四舍五入），让守城的更耐打。"""
+        """守城加成：开打前把体力抬高 CITY_DEFENSE_MULT 倍（四舍五入）。"""
         if self.city_boost:
             return
         self.stamina = round_half_up(self.stamina * CITY_DEFENSE_MULT)
@@ -228,13 +165,10 @@ class General:
 # 移动前的「带多少粮草」弹窗
 # --------------------------------------------------------------------------
 class GrainPick:
-    """出发点堆着粮草时，走之前问一句「搬多少过去」。
+    """出发点堆着粮草时，走之前问一句「搬多少过去」（只问人类玩家，电脑由 ai.py 算）。
 
-    人类玩家才问：点了目的地先把这一步按住，选完数量才真正落子。电脑不问，
-    它的搬运量由 ai.py 直接算好。取消就当没走过这一步，武将继续选着。
-
-    搬运**没有上限**，所以固定几个按钮不够用——这里做成可增减的步进控件：
-    ±1 / ±10 微调，「全带」「不带」两个快捷，确定后才落子。
+    取消就当没走过这一步。搬运没有上限，固定几个按钮不够用，
+    所以做成可增减的步进控件。
     """
 
     BOX_W, BOX_H = 468, 262
@@ -248,7 +182,7 @@ class GrainPick:
         self.steps = steps
         self.origin = gen.pos
         self.available = game.grain_at(*gen.pos)
-        self.amount = self.available          # 默认全搬过去（最常见的意思）
+        self.amount = self.available          # 默认全搬过去（最常见的一种搬法）
 
     # ---------------- 操作 ----------------
     def box_rect(self):
@@ -350,7 +284,7 @@ class GrainPick:
 # --------------------------------------------------------------------------
 # 计谋的界面：先挑计谋（CunningPick），再在棋盘上点目标（CunningAim）
 # --------------------------------------------------------------------------
-# 弹窗里"这一计现在使不出来"的原因，按计谋各写一句（点不动的时候总得说清楚为什么）
+# 四条计谋各自"现在使不出来"的原因；点不动的时候总得说清楚为什么
 _NO_TARGET_HINT = {
     "sneak": "身边没有可跃的障碍（要隔一格障碍、正对面能落脚）",
     "lure": f"{STRATAGEM_RANGE} 格内没有调得动的敌将（智力差不够，或他无路可调）",
@@ -362,8 +296,7 @@ _NO_TARGET_HINT = {
 def cunning_block_reason(gen):
     """现在为什么打不开用计弹窗；能开就返回 None。
 
-    只卡**代价**这两样，不卡"四条计谋有没有目标"——目标有没有是弹窗里逐条说的，
-    所以一个目标都没有时弹窗照样打得开（看得到原因才不至于瞎猜）。
+    只卡代价这两样，不卡"四条计谋有没有目标"——后者是弹窗里逐条说的。
     """
     if gen is None or not gen.alive:
         return "先选一名己方武将"
@@ -375,11 +308,7 @@ def cunning_block_reason(gen):
 
 
 class CunningPick:
-    """用计弹窗：四条计谋各占一行，写明成功率或"使不出来"的原因。
-
-    代价是在**瞄准态点了目标**那一刻才扣的，所以在这里挑来挑去不花钱。
-    一个目标都凑不出来的计谋画成暗色、点不动——省得白点一下才发现没处使。
-    """
+    """用计弹窗：四条计谋各占一行，写明成功率或"使不出来"的原因。"""
 
     BOX_W, BOX_H = 566, 394
     ROW_TOP, ROW_H = 92, 62
@@ -400,7 +329,7 @@ class CunningPick:
                               self._status(spec.key, found), bool(found)))
 
     def _status(self, key, found):
-        """这一行右边那截说明：有目标就报成功率（和目标数），没有就报为什么使不出来。"""
+        """这一行右边那截说明：有目标就报成功率，没有就报为什么使不出来。"""
         if not found:
             return _NO_TARGET_HINT[key]
         game, gen = self.game, self.gen
@@ -510,14 +439,8 @@ class CunningPick:
 class CunningAim:
     """用计的瞄准态：挑完计谋之后，在棋盘上点目标。
 
-    三个小状态：
-        target  —— 点这一计的对象（落点 / 敌将 / 有粮的格）。**代价在这一刻结算**：
-                   点下去就扣 1 点行动力 + 10 点体力，然后当场掷骰。
-        partner —— 内讧得手了：再点一名敌将，让他和中计的那位自相残杀
-        lure    —— 调虎离山得手了：给中计的敌将挑个落脚点（走几格是掷出来的，走到哪由你定）
-
-    后面两个状态是"计谋已经成了，把结果摆完"，所以按 ESC 不生效——泼出去的水收不回来。
-    ESC 只在 target 阶段管用，那时代价还没扣，等于当没点过。
+    三个小状态：target 点这一计的对象（**代价在这一刻结算**）；partner 是内讧得手后
+    点第二名敌将；lure 是调虎离山得手后挑落脚点。后两个按 ESC 不生效（已经成了）。
     """
 
     def __init__(self, game, gen, key):
@@ -667,25 +590,23 @@ class CunningAim:
 # 游戏主体
 # --------------------------------------------------------------------------
 class Game:
-    # 侧边栏「武将总览」的版面：一栏一方并排，栏高 = 标题 + **可见行数** * 行高
+    # 侧边栏「武将总览」的版面：栏高 = 标题 + 可见行数 * 行高
     ROSTER_TITLE_H = 18     # 一方标题（玩家名）那一行
     ROSTER_ROW_H = 17       # 每名武将一行
     ROSTER_COL_GAP = 12     # 两栏之间的间距
-    # 一屏最多显示几名武将——超过就变成可滚动的窗口（滚轮翻看）。
-    # 这个数决定了总览占多高，也就决定了战报能剩几行：7 行时战报还有 4 行。
-    # 调大要掂量：上阵人数多（DEPLOY_COUNT）时，总览会挤掉「最新动态」。
+    # 一屏最多显示几名武将，超过就变成可滚动窗口：调大要掂量，人一多就会挤掉战报
     ROSTER_MAX_ROWS = 7
 
     # 侧边栏「选中武将」详情框的版面（右边并排一块同样高的「比分板」）
     INFO_COL_GAP = 12       # 详情框与比分板之间的间距（两者平分侧边栏宽度）
-    INFO_BOX_H = 146        # 框高：4 行文字（8/34/54/72）+ 两行按钮（吃粮 / 用计）
+    INFO_BOX_H = 146        # 框高：4 行文字 + 两行按钮（吃粮 / 用计）
     INFO_BTN_TOP = 90       # 第一排按钮（吃粮）的 y（相对框顶）
     INFO_BTN_W = 50         # 「吃粮」按钮宽
     INFO_BTN_H = 22
     INFO_BTN_GAP = 6
     INFO_BTN2_TOP = 116     # 第二排按钮（用计）的 y（相对框顶）
 
-    # 比分板的版面：标题（含"争夺中"）+ 一行双方阵营 + 总分/将领分/地盘分三行
+    # 比分板的版面：标题 + 阵营行 + 总分/将领分/地盘分三行
     SCORE_ROW_TOP = 50      # 第一行数字的 y（相对框顶）
     SCORE_ROW_PITCH = 19
     SCORE_LABEL_W = 54      # 左边名目那一列（总分 / 将领分 / 地盘分）
@@ -728,10 +649,7 @@ class Game:
         self.start_turn(announce=False)
 
     def start_match(self, human_side=P1, players=2):
-        """按选定的模式开一局；配置有问题就抛 ConfigError，当前对局原样保留。
-
-        players=1 时人类执 human_side、另一边交给电脑；players=2 时两边都是人。
-        """
+        """按选定的模式开一局；配置有问题就抛 ConfigError，当前对局原样保留。"""
         self.new_game()                   # 先把新的地图/武将读好，失败就不会动到控制器
         self.players = players
         self.human_side = human_side
@@ -748,19 +666,13 @@ class Game:
         return self.controllers[player if player is not None else self.current] == AI
 
     def human_may_act(self):
-        """现在轮到人类做决定吗：棋盘上点武将/走子，或者交战屏上按按钮。
-
-        电脑思考时一律返回 False，键盘鼠标都不接（翻看战报之类不算做决定，不在这里管）。
-        """
+        """现在轮到人类做决定吗（电脑思考时一律 False，键盘鼠标都不接）。"""
         if self.battle is not None:
             return self.battle.human_may_act()
         return not self.over and not self.is_ai(self.current)
 
     def load_map(self, path=None):
-        """读地图配置 -> (grid, places)：地形和地名都来自同一个文件。
-
-        校验不过抛 MapConfigError，不碰当前对局。
-        """
+        """读地图配置 -> (grid, places)：地形和地名都来自同一个文件。"""
         return parse_map(Path(path) if path else MAP_FILE)
 
     def load_roster(self, path=None):
@@ -768,11 +680,7 @@ class Game:
         return parse_roster(Path(path) if path else ROSTER_FILE)
 
     def create_generals(self):
-        """每方从本方 20 名里随机抽 DEPLOY_COUNT 名上阵，落到分好的出生点上。
-
-        两边的上阵人数各配各的（DEPLOY_COUNT[P1] / [P2]），可以不一样多。
-        抽将和出生点都用 self.rng，所以按 R 重开会重新抽将、重新站位。
-        """
+        """每方从本方名册里随机抽 DEPLOY_COUNT 名上阵，落到分好的出生点上（用 self.rng）。"""
         for player in (P1, P2):
             drafted = self.rng.sample(self.roster[player], DEPLOY_COUNT[player])
             for spec, (r, c) in zip(drafted, self.spawns[player]):
@@ -793,10 +701,7 @@ class Game:
         return f"{self.places[(r, c)]}（{TERRAIN_NAME[terrain]}）"
 
     def can_stop(self, gen, r, c):
-        """gen 能不能停在 (r,c)：通路/城池、没有敌方、且己方在那格凑不满 CELL_CAPACITY。
-
-        敌方格永远不能停——走进去等于交战，由 compute_attackable 单独给出。
-        """
+        """gen 能不能停在 (r,c)：通路/城池、没有敌方、且己方在那格不满员。"""
         if not self.in_bounds(r, c) or self.grid[r][c] == OBSTACLE:
             return False
         others = [g for g in self.generals_at(r, c) if g is not gen]
@@ -805,11 +710,7 @@ class Game:
         return len(others) < CELL_CAPACITY
 
     def can_transit(self, gen, r, c):
-        """gen 能不能路过 (r,c)：通路/城池且没有敌方。
-
-        己方格子就算已经站满 CELL_CAPACITY 也能穿过去（只要终态不超员），
-        自家的两个人不会把一条要道彻底堵死。
-        """
+        """gen 能不能路过 (r,c)：通路/城池、无敌方；己方满了也能穿过（判终态）。"""
         if not self.in_bounds(r, c) or self.grid[r][c] == OBSTACLE:
             return False
         return not any(g.owner != gen.owner for g in self.generals_at(r, c))
@@ -828,9 +729,8 @@ class Game:
     def compute_reachable(self, gen):
         """BFS 算出该武将本回合能走到的落脚点 -> {pos: 需要花掉的移动力}
 
-        移动力只决定能走多远，与体力无关；所以这里也不看体力。
-        只收录能"停"的格子：敌方格子不在这里（走进去等于交战，由 compute_attackable
-        单独给出），己方已经站满两名的那格只能路过、不能停。
+        只收录**停得下**的格子：走得到的敌方格归 compute_attackable，
+        己方站满两名的那格只能路过、不能停。
         """
         if gen.exhausted:
             return {}
@@ -861,11 +761,7 @@ class Game:
 
     # ---------------- 武将总览（可滚动） ----------------
     def roster_rows(self):
-        """武将总览：(人多的一边共几行, 一屏看得见几行)。
-
-        DEPLOY_COUNT 调大之后，一边可能上阵十几名，全竖排出来会把上面的战报顶穿，
-        所以总览一屏只留 ROSTER_MAX_ROWS 行，多出来的靠滚轮翻。
-        """
+        """武将总览：(人多的一边共几行, 一屏看得见几行)；多出来的行靠滚轮翻看。"""
         per_side = max(sum(1 for g in self.generals if g.owner == p) for p in (P1, P2))
         return per_side, min(per_side, self.ROSTER_MAX_ROWS)
 
@@ -924,25 +820,19 @@ class Game:
         return sum(self.grain.values())
 
     def grain_turn(self):
-        """这一回合是不是"入库回合"：第 GRAIN_TURN_FIRST 回合起，每 GRAIN_EVERY_TURNS 个回合来一次。
+        """这一回合是不是"入库回合"。
 
-        默认落在 4 / 9 / 14 / 19 …（回合数 % 5 == 4），其余回合不产粮。
+        即第 GRAIN_TURN_FIRST 回合起，每 GRAIN_EVERY_TURNS 回合来一次。
         """
         return self.turn % GRAIN_EVERY_TURNS == GRAIN_TURN_FIRST % GRAIN_EVERY_TURNS
 
     def next_grain_turn(self):
-        """下一次城池入库在第几回合（入库发生在那个回合的**开头**）。
-
-        侧边栏拿它显示"下批粮草第 N 回合"，让玩家心里有数，不必自己数回合。
-        """
+        """下一次城池入库在第几回合（入库发生在那个回合的**开头**）。"""
         gap = (GRAIN_TURN_FIRST % GRAIN_EVERY_TURNS - self.turn) % GRAIN_EVERY_TURNS
         return self.turn + (gap or GRAIN_EVERY_TURNS)
 
     def produce_grain(self):
-        """入库回合：每座城池产 GRAIN_PER_CITY 石，堆在城池那一格上；平时什么都不做。
-
-        城池归谁占着不影响产出——粮草没有归属，谁站上去谁就能取。
-        """
+        """入库回合：每座城池产 GRAIN_PER_CITY 石，堆在城池那一格上；平时什么都不做。"""
         if not self.grain_turn():
             return 0
         made = 0
@@ -960,9 +850,7 @@ class Game:
     def eat_amounts(self, gen):
         """这名武将这一口可以吃几石 -> [1, 2, 3] 的子集（不能吃就是空）。
 
-        三个上限一起卡：一口最多 GRAIN_EAT_MAX 石、**脚下**得有那么多粮、
-        还得有同样多的移动力——吃 k 石花 k 点行动力。
-        粮草不带在身上（见 walk），所以吃的一定是站着的这一格的。
+        三个上限一起卡：GRAIN_EAT_MAX、脚下的粮、剩余移动力（吃 k 石花 k 点行动力）。
         """
         if gen is None or not gen.alive or gen.exhausted:
             return []
@@ -970,7 +858,7 @@ class Game:
         return list(range(1, top + 1))
 
     def eat_grain(self, gen, amount):
-        """吃粮：吃 amount 石，回 amount * GRAIN_HEAL 体力，花掉同样多的移动力。"""
+        """吃粮：吃 amount 石，回体力并花掉同样多的移动力；这一口吃不下就返回 False。"""
         if amount not in self.eat_amounts(gen):
             return False
         self.take_grain(gen.row, gen.col, amount)
@@ -996,9 +884,7 @@ class Game:
         self.attackable = set()
 
     def handle_board_click(self, row, col):
-        # 先看"是不是走到这儿"：已经选中了武将、点的又是他能走到的落脚点。
-        # 落脚点只可能是空格或己方格（can_stop 挡掉了敌方格和自己那一格），
-        # 所以这条不会跟下面的"选中 / 攻击"抢——点了高亮格就是走过去。
+        # 先看是否走到这儿：落脚点只可能是空格或己方格（can_stop 挡掉了敌方格和本身）
         if self.selected and (row, col) in self.reachable:
             self.move(self.selected, row, col)
             return
@@ -1019,8 +905,7 @@ class Game:
     def click_own(self, ours):
         """点自己人：同格站着几名就依次轮换选中，轮完最后一个再点一下就取消选中。
 
-        取消选中是必要的退路：点的格子若是当前武将的落脚点，会被判成"走过去"，
-        想改选站在那格上的武将时，得先把选中清掉。
+        取消选中是必要的退路——点的格子若是当前武将的落脚点，会被判成"走过去"。
         """
         cycle = ours + [None]                 # 末尾的 None 表示"取消选中"
         pos = cycle.index(self.selected) if self.selected in ours else -1
@@ -1029,13 +914,10 @@ class Game:
     def move(self, gen, row, col, carry=None):
         """走一步（或一次走好几格）：按格数扣移动力，不扣体力。
 
-        步数按当前局面现算，不去读 self.reachable——那是"界面上选中了谁"的缓存，
-        电脑对手也会走子，不该要求它先把选中态摆对。走不到就什么都不做。
+        步数现算，**不去读 self.reachable**——那是界面缓存，电脑走子也不能要求它
+        先把选中态摆对。走不到就什么都不做。
 
-        carry 是这一步从出发格搬到落点的粮草数（不是背在身上，见 walk）：
-          * 传了数字 —— 直接按这个数搬（电脑走子走这条，见 ai.py）；
-          * 没传（None）—— 出发点有粮草、而且是人操作的，就先弹窗问一句；
-            出发点没粮就直接走 0。
+        carry 是这一步从出发格搬走的粮草数（电脑传数字，人操作则传 None，由这里决定）。
         """
         steps = self.compute_reachable(gen).get((row, col))
         if steps is None:
@@ -1049,12 +931,8 @@ class Game:
         return True
 
     def walk(self, gen, row, col, steps, carry=0):
-        """真正落地：从出发点取粮，走到目的地后**当场卸下**、并入那一格的粮堆。
-
-        武将只是脚夫，不是粮仓——身上不存粮，所以一次「携带」的净效果就是
-        把粮草从出发格搬到落点格。要接着往远处送，下一回合从落点再取一次即可。
-        取到的数量以出发格实际有的为准（要得多了就取到没有为止）。
-        """
+        """真正落地：从出发点取粮，走到目的地后**当场卸下**、并入那一格的粮堆。"""
+        # 武将只是脚夫、不是粮仓：粮草从不带在身上，所以这一趟的净效果就是挪一格
         picked = self.take_grain(gen.row, gen.col, carry) if carry > 0 else 0
         gen.row, gen.col = row, col
         gen.move_points = max(0, gen.move_points - steps)
@@ -1065,7 +943,7 @@ class Game:
         self.push_log(f"{gen.name} 移动 {steps} 格至 {self.describe(row, col)}，"
                       f"剩余移动力 {gen.move_points}{with_grain}。")
         self.select(gen)                      # 重新计算剩余可走范围
-        # 移动后若与敌人相邻，提示可以打
+        # 移动后与敌人相邻，提示一句可以打
         if self.compute_attackable(gen):
             self.push_log(f"{gen.name} 与敌军相邻，可以踏进去交战！")
         return True
@@ -1074,13 +952,8 @@ class Game:
     def charge(self, attacker, row, col):
         """向相邻的敌方武将格发动进攻：花 ATTACK_COST 点移动力，然后切到交战界面。
 
-        这一格里可能有 1-2 名守将，谁先迎战由守方在交战界面里定；攻方得把他们
-        一个个打完才能进占这一格。真正的胜负判定与伤害结算都在 Battle 那一屏上完成
-        （结算结果直接体现在双方体力上），打完由 end_battle 回到地图。
-        交战不结束该武将的行动：只要还有移动力，就能接着走、接着撞下一个人。
-
-        这一笔只是"进攻"的钱。打退守军、就地进占，账就结清了；
-        要是半路收手撤退，得再补 ATK_RETREAT_COST 点（见 Battle.can_retreat）。
+        这一笔只是"进攻"的钱：打退守军就地进占，账就结清；半路收手撤退另需
+        ATK_RETREAT_COST 点（见 Battle.can_retreat）。交战不结束该武将的行动。
         """
         defenders = self.generals_at(row, col)
         attacker.move_points = max(0, attacker.move_points - ATTACK_COST)
@@ -1120,8 +993,7 @@ class Game:
     def regen_side(self, player):
         """回合结束时的自动回血：这一方存活武将各按**当前所在地形**回体力。
 
-        放在回合结束（而不是下一回合开始）是本次改的：掉的血要撑过对方的整个回合，
-        下回合开头不再白回一口——地形相同，但结算的时机变了，代价更真实。
+        故意放在回合结束而不是下一回合开始：掉的血要撑过对方的整个回合才回。
         """
         for gen in self.generals:
             if gen.alive and gen.owner == player:
@@ -1160,23 +1032,19 @@ class Game:
 
     # ---------------- 计分 ----------------
     def general_score(self, player):
-        """将领分：本方每名**存活**武将各算 (100 + 体力) × 武力，逐名求和。
-
-        阵亡的不再计分（体力已经是 0，人也从棋盘上消失了）。
-        """
+        """将领分：本方每名**存活**武将各算 (SCORE_GENERAL_BASE + 体力) × 武力，逐名求和。"""
         return sum((SCORE_GENERAL_BASE + gen.stamina) * gen.might
                    for gen in self.generals if gen.alive and gen.owner == player)
 
     def territory_value(self, r, c):
-        """一块地域值多少分：地形分（通路 200 / 城池 3000）+ 格上粮草每石 150。"""
+        """一块地域值多少分：地形分 + 格上粮草每石 SCORE_GRAIN。"""
         return SCORE_TERRAIN[self.grid[r][c]] + self.grain_at(r, c) * SCORE_GRAIN
 
     def distance_field(self, player):
         """这一方到各格的**行动距离**（步数）-> {格子: 步数}；到不了的不在表里。
 
-        多源 BFS：从这一方所有存活武将同时往外走，所以每一步都取"最近的那名武将"。
-        距离只在通路 / 城池上量（障碍得绕），**格上站着谁不影响**——这量的是
-        "这一方的兵要几步才能到这儿"，不是"现在谁能站上去"。
+        多源 BFS。**格上站着谁不影响**——量的是"这一方的兵要几步才能到这儿"，
+        不是"现在谁能站上去"，所以地盘会随阵线推进而变。
         """
         dist = {}
         q = deque()
@@ -1197,9 +1065,7 @@ class Game:
     def territory_scores(self):
         """控制地域（含物品）分 -> ({玩家: 分}, 争夺中的格数)。
 
-        每一块可通行地域归**行动距离最近**的那一方（距离见 distance_field）。
-        两边一样近——包括双方都到不了——就算"争夺中"，谁也不算这一块。
-        障碍不是地盘，压根不参与判定。
+        每块可通行地域归**行动距离最近**的那一方，一样近就算争夺中。
         """
         fields = {player: self.distance_field(player) for player in (P1, P2)}
         scores = {P1: 0, P2: 0}
@@ -1242,6 +1108,7 @@ class Game:
 
     def set_winner(self, player, text):
         """定下胜负：player 为 None 就是平局。两种情况下对局都算结束。"""
+        # 平局时 player 是 None；两种情况都算结束，banner 常驻不消失
         self.over = True
         self.winner = player
         self.push_log(text)
@@ -1344,9 +1211,9 @@ class Game:
         screen.blit(txt, txt.get_rect(center=(rect.centerx, rect.bottom - 11)))
 
     def draw_grain(self, screen, r, c):
-        """格子右上角挂一个粮草徽标——堆在格子上的公共粮草有几石。
+        """格子右上角挂一个粮草徽标（堆着的公共粮草有几石）；没粮就不画。
 
-        数量大了字号会自己缩，免得徽标撑出格子；格子上没粮就直接不画。
+        数量大了字号会自己缩，免得徽标撑出格子。
         """
         n = self.grain_at(r, c)
         if not n:
@@ -1443,8 +1310,7 @@ class Game:
     def info_top(self):
         """选中武将详情框的顶边。
 
-        版面是固定的，这里和 draw_sidebar 的排布对齐——点「吃粮」按钮时要用同一个
-        位置算矩形，所以不能各算各的。
+        必须和 draw_sidebar 的排布对齐：点「吃粮」按钮要用同一个位置算矩形。
         """
         y = MARGIN + 14 + 32                      # 标题
         return y + (30 if self.over else 22 + 30)  # 结束横幅 / 回合行 + 行动方行
@@ -1538,14 +1404,11 @@ class Game:
             screen.blit(get_font(15, bold=True).render(label, True, C_TEXT), (panel.left + 16, y))
             y += 30
 
-        # 选中武将详情 + 比分板：并排一行，顶边由 info_top() 定死，
-        # 好吃粮按钮的命中矩形对得上
+        # 详情 + 比分板并排一行；顶边由 info_top() 定死，吃粮按钮的命中矩形要用
         self.draw_score_board(screen, self.score_box())
         y = self.draw_selected_info(screen, panel, self.info_top())
 
-        # 底部武将总览：**一栏一方并排**，栏高只看人多的一边——两边人数可以不一样多
-        # （DEPLOY_COUNT）。一屏只放 ROSTER_MAX_ROWS 行，上阵人数更多时变成可滚动窗口
-        # （滚轮翻看，右边有滚动条），这样人再多也不会顶穿上面的战报和选中武将详情。
+        # 底部武将总览：一栏一方并排；一屏只放 ROSTER_MAX_ROWS 行，多出来的滚轮翻
         per_side, visible = self.roster_rows()
         start = self.roster_start
         roster = self.roster_rect(buttons)
@@ -1595,12 +1458,7 @@ class Game:
             screen.blit(surf, surf.get_rect(center=box.center))
 
     def draw_score_board(self, screen, box):
-        """常驻比分板：双方的总分 / 将领分 / 地盘分（怎么算见 Game.scoreboard）。
-
-        和「选中武将详情」并排在同一行，一局自始至终挂着，谁领先一眼就能看出来。
-        左边一列是名目，右边两栏一人一边（左边红方、右边蓝方，和下面的武将总览一致）；
-        争夺中的格子谁也不算，所以在标题右边单独报一个数，免得两边地盘加起来对不上整张图。
-        """
+        """常驻比分板：双方的总分 / 将领分 / 地盘分（怎么算见 Game.scoreboard）。"""
         board, contested = self.scoreboard()
         pygame.draw.rect(screen, (42, 46, 58), box, border_radius=8)
         pygame.draw.rect(screen, (86, 94, 112), box, 2, border_radius=8)
@@ -1643,7 +1501,7 @@ class Game:
         screen.blit(f_big.render(gen.name, True, C_TEXT), (box.left + 12, box.top + 8))
         stats = f"武力 {gen.might}   智力 {gen.intellect}"
         screen.blit(f_sm.render(stats, True, C_TEXT), (box.left + 12, box.top + 34))
-        # 所在格的粮草跟在属性后面同一行：堆粮没有上限，数字会长，用 fit_font 兜住（宁可缩字号）
+        # 堆粮没上限、数字会长，用 fit_font 兜住（宁可缩字号）
         grain_txt = f"此地粮 {self.grain_at(*gen.pos)}"
         gx = box.left + 12 + f_sm.size(stats)[0] + 16
         grain_font = fit_font(grain_txt, box.right - 12 - gx, start=12, min_size=8, bold=False)
@@ -1661,7 +1519,7 @@ class Game:
             note += "  · 本回合已走完"
         elif self.compute_attackable(gen):
             note += "  · 可踏进去交战"
-        # 地名长短不一（「襄阳（城池）」到「濡须口（通路）」），窄框里用 fit_font 兜住
+        # 地名长短不一，窄框里用 fit_font 兜住
         note_font = fit_font(note, box.width - 24, start=12, min_size=9, bold=False)
         screen.blit(note_font.render(note, True, C_TEXT_DIM), (box.left + 12, box.top + 72))
 
@@ -1677,7 +1535,7 @@ class Game:
             txt = get_font(11, bold=True).render(label, True, C_GRAIN)
             screen.blit(txt, txt.get_rect(center=rect.center))
 
-        # 第二行：用计。付不起代价就画成暗色，点了只报一句为什么（见 Game.open_cunning）
+        # 第二行用计：付不起代价就画成暗色，点了只报一句为什么（见 open_cunning）
         rect = self.cunning_button()
         block = cunning_block_reason(gen)
         hover = rect.collidepoint(pygame.mouse.get_pos()) and not block
@@ -1691,13 +1549,7 @@ class Game:
         return box.bottom + 12
 
     def draw_roster(self, screen, col, player, start, visible):
-        """把一方武将列成一个竖栏（col 是这一栏的区域）。
-
-        两栏并排，各占一个 col：一方人少就下面留空，不会挤到另一边。
-        只画 [start, start+visible) 这几行——上阵人数超过一屏时靠滚轮翻看。
-        字号比战报小一号（11），因为一栏只有半个侧边栏宽——最长的名字
-        （「诸葛亮 武22 智22 体100」）在 11 号下约 127px，半栏 138px 放得下。
-        """
+        """把一方武将列成一个竖栏（col 是这一栏的区域）；只画 [start, start+visible) 这几行。"""
         font = get_font(11)
         screen.blit(font.render(PLAYER_NAME[player], True, PLAYER_COLOR[player]),
                     (col.left, col.top))
@@ -1732,51 +1584,18 @@ class Game:
 class Battle:
     """一次交战的独立界面：一格守军最多两名，攻方要把他们一个个打完。
 
-    出战顺序
-    --------
-    * 攻方踏进敌方格子时，若那格有两名守将，**由守方决定谁先迎战**（PICK_DEFENDER）。
-    * 攻方与第一名守将打完（守将撤退或阵亡）后，只要这一格还有守将，就自动接着打
-      下一名。**第二场开打前双方都可以选择撤退**（仍是攻方先选）——因为这时攻方
-      已经打了一场、守方却是生力军，给双方一个收手的机会。
-    * 把守将全部打完、且攻方自己没退没死，攻方才进占这一格。
+    出战顺序与单挑算式、各笔撤退代价的规则见 README.md，这里只说代码要点：
+    * 守军两名时由守方点将（PICK_DEFENDER）定谁先迎战，打完一名（撤退或阵亡
+      都算）就自动接着打下一名；**第二场开打前双方都能先撤**（仍是攻方先选）。
+    * 每回合双方同时掉血，各自取 [1, loss_range(self)] 里的随机整数（见 roll）。
+    * 攻方撤退当场再补 ATK_RETREAT_COST 点且**不赊账**，手头不够连按钮都不给
+      （见 can_retreat）；守方撤退的额度见 retreat_paths。
 
-    单挑规则（胜负判定 + 伤害结算都在这屏上完成）
-    ------------------------------------------
-    * 每回合双方**同时**掉体力，掉多少只看**对方**武力：取闭区间
-      [1, LOSS_MAX_PER_MIGHT * 对方武力] 里的一个随机整数（默认就是 2 倍对方武力）。
-      武力高的武将打得疼，也扛得住——因为对方的武力决定了"打他多重"。
-    * 每回合结束时双方都可以选择撤退，由**攻方先选**；撤退的一方算败方。
-      两边都选继续就进下一回合，所以第一场撤退至少要等第 1 回合打完才能选。
-    * 体力掉到 0 或以下即阵亡，同样算败方；双方同一回合都掉到 0 就是同归于尽。
-    * 打完时双方剩多少体力，就是这场交战的伤害结算结果——不再有额外的伤害公式。
-
-    撤退
-    ----
-    * **进攻**本身花 ATTACK_COST 点移动力（踏进去就扣，见 Game.charge）。
-    * **攻方撤退**：人还是站在出发格不动，但要**再补 ATK_RETREAT_COST 点**移动力，
-      所以"打一半收手"总共花 ATTACK_COST + ATK_RETREAT_COST 点；守军被打光、就地进占
-      则只花 ATTACK_COST 点。攻方**不赊账**（没有透支一说）——手头不够这几点的，
-      界面上压根不给撤退按钮，只能接着缠斗（见 can_retreat）。
-    * **守方撤退**：从争夺格做 BFS，挑一个落脚点撤过去，撤几格就**透支下回合几点行动力**。
-      路径是 BFS 算出来的，**可以拐弯、不要求走直线**；约束是第一步不能迎着攻方来的方向，
-      中途每格要过得去（通路/城池、无敌方），落脚那格还要停得下（己方不满 CELL_CAPACITY）。
-      步数取 BFS 最短距离，所以每个落脚点对应一个确定的透支数。
-    * **同一回合累计撤退格数封顶 MOVE_POINTS**：已经撤过的格数一扣，剩下的才是这轮的额度
-      （退满满额，下回合就走不动了）。额度不够的落脚点根本不算合法撤退，不会列出来；
-      额度为 0 时守方就没有撤退的权利。
-    * 一个落脚点都没有时，守方**没有撤退的权利**，界面上不给"撤退"按钮，只能继续缠斗。
-      可选项不止一个时由守方自己挑（RETREAT_PICK）。
-
-    状态流转
-    --------
-        PICK_DEFENDER --点将--> 第一场 READY
-        第一场: READY --交手--> IMPACT --掉血动画放完--> 有人下场？ --> 换人 / 收场
-                                              \\--> 都还活着 --> CHOOSE_ATK
-        第二场: 直接从 CHOOSE_ATK 起手（第一回合前双方都能撤）
-        CHOOSE_ATK --继续--> CHOOSE_DFD --继续--> 下一回合的 READY
-        CHOOSE_ATK --撤退--> OVER（攻方原地不动，再补 ATK_RETREAT_COST 点）
-        CHOOSE_DFD --撤退--> RETREAT_PICK --选好方向步数--> 换人 / 攻方进占
-        OVER --返回战场--> 回到地图
+    状态流转（第二场从 CHOOSE_ATK 起手）：
+        一回合: CHOOSE_ATK --继续--> CHOOSE_DFD --继续--> 下一回合的 READY
+        READY --交手--> IMPACT --动画放完--> 有人下场？ --否--> 上一行；是则换人 / 收场
+        PICK_DEFENDER --点将--> READY    CHOOSE_DFD --撤退--> RETREAT_PICK --> 换人 / 进占
+        CHOOSE_ATK --撤退--> OVER（攻方原地不动）    OVER --返回战场--> 回到地图
     """
 
     (PICK_DEFENDER, READY, IMPACT,
@@ -1812,7 +1631,7 @@ class Battle:
         self.retreat_choices = []             # RETREAT_PICK 阶段可点的 (落脚点, 步数)
         self.retreat_from = None              # 从哪个状态点进撤退选择的（"再想想"用）
         self.ending = ""
-        # 守城加成：守的是城池就先给守军抬高体力，打完再压回去（见 finish）
+        # 守的是城池就先抬高守军体力，打完再压回去（见 finish）
         self.city_defense = game.grid[self.cell[0]][self.cell[1]] == CITY
         if self.city_defense:
             for defender in self.defenders:
@@ -1861,11 +1680,7 @@ class Battle:
         return self.round == 0 and self.state in (self.CHOOSE_ATK, self.CHOOSE_DFD)
 
     def human_may_act(self):
-        """这一屏现在等人类做决定吗（键盘鼠标该不该接）。
-
-        1P 模式下交战双方的控制器可能不一样：电脑那一半自己决定，
-        人类这一半照样要手点——比如电脑进攻时，守方的"继续 / 撤退 / 往哪撤"还是你说了算。
-        """
+        """这一屏现在等人类做决定吗（1P 下跟着阵营走，不跟"谁在进攻"走）。"""
         game = self.game
         if self.state == self.PICK_DEFENDER:
             return not game.is_ai(self.defenders[0].owner)
@@ -1922,7 +1737,7 @@ class Battle:
         self.hint = f"第 {self.round} 回合结束，{self.atk.name}（攻方）先决定：{tail}"
 
     def continue_fight(self):
-        """选择继续：攻方选完轮到守方，两边都选继续就打下一回合（或第二场的第一回合）。"""
+        """选择继续：攻方选完轮到守方，两边都选继续就打下一回合。"""
         if self.state == self.CHOOSE_ATK:
             self.state = self.CHOOSE_DFD
             self.hint = (f"{self.atk.name} 继续缠斗，现在轮到 {self.dfd.name}（守方）"
@@ -1962,9 +1777,7 @@ class Battle:
     def finish(self, text):
         """整场交战结束：结算守城加成、把战果落回地图。
 
-        粮草不用在这里交接：粮草从不带在武将身上（见 Game.walk），
-        始终堆在格子里，所以「败方带不走粮草」是天然成立的——
-        撤退的守将走了、阵亡的倒了，争夺格上那堆粮原地不动。
+        粮草不用交接——它从不带在武将身上，始终堆在格子里。
         """
         self.state, self.hint = self.OVER, text
         for defender in self.defenders:
@@ -1991,13 +1804,9 @@ class Battle:
     def retreat_paths(self):
         """守方能撤到哪几格、各要几步 -> {终点: 步数}；一处都去不了就是空。
 
-        从争夺格做 BFS：一格一格挪，**可以拐弯，不要求走直线**。约束有这么几条——
-        * 第一步不能迎着攻方来的方向（那是朝刀口上撞）；
-        * 中途每一格都要"过得去"（通路/城池、没有敌方）；
-        * 落脚的那一格还要"停得下"（己方不满 CELL_CAPACITY）；
-        * 加上本回合已经撤过的格数，累计不能超过 MOVE_POINTS——超了就不是合法的撤退，
-          那些落脚点压根不会列出来。
-        步数取的是 BFS 最短距离，也就等于这次撤退要透支的行动力。
+        从争夺格做 BFS（可以拐弯、不要求走直线），四条约束：第一步不能迎着攻方来的
+        方向；中途每格要过得去；落脚那格还要停得下；已撤格数不得超 MOVE_POINTS。
+        步数 = BFS 最短距离，也就是这一撤要透支的行动力。
         """
         cell = self.cell
         came = self.came_direction()
@@ -2030,10 +1839,7 @@ class Battle:
     def can_retreat(self):
         """当前该做决定的一方有没有撤退的权利。
 
-        攻方：撤退是"当场收手"，要再补 ATK_RETREAT_COST 点移动力，而且**不赊账**——
-              手头不够这几点的，连撤退按钮都不给，只能接着缠斗。
-              人本来就站在出发格没动窝，所以这笔账只是扣移动力，不涉及挪格子。
-        守方：得真有退路（retreat_paths 里有落脚点）才有撤退的权利。
+        攻方要补得起 ATK_RETREAT_COST，守方得真有退路（见 retreat_paths）。
         """
         if self.chooser is self.atk:
             return self.atk.move_points >= ATK_RETREAT_COST
@@ -2170,10 +1976,9 @@ class Battle:
         return max(0, len(self.rounds) - self.HIST_ROWS)
 
     def primary(self):
-        """空格 / 回车：走第一个按钮（交手 / 继续缠斗 / 返回战场），不会误触撤退。
+        """空格 / 回车：走第一个按钮，不会误触撤退。
 
-        点将和挑撤退方向那两屏例外：那里的按钮都是"替自己做决定"，按空格什么都不做，
-        必须用鼠标点，免得手一快就替守方定了出战顺序或撤退方向。
+        点将和挑撤退方向那两屏例外：那里的按钮是"替自己人做决定"，按空格什么都不做。
         """
         if self.state in (self.PICK_DEFENDER, self.RETREAT_PICK):
             return
@@ -2465,8 +2270,8 @@ def show_config_error(exc):
 def choose_mode(screen, clock):
     """开局的模式选择 -> (人类执哪边, 玩家人数)；关窗口 / ESC 退出返回 None。
 
-    两步走：先选一人游玩还是两人同机；选了一人再选执蜀还是执魏（两人就直接开打）。
-    第二步按 ESC 是"回上一步"，不是退出。
+    两步走：先选一人游玩还是两人同机，选了一人再选执蜀还是执魏；
+    第二步按 ESC 是回上一步，不是退出。
     """
     idx = menu_screen(screen, clock, "选择对局模式",
                       [("一人游玩（对抗电脑）", "你执一边，另一边交给电脑"),
@@ -2486,10 +2291,7 @@ def choose_mode(screen, clock):
 
 
 def menu_screen(screen, clock, title, options, foot):
-    """画一屏选项 -> 选中的下标；关窗口 / 按 ESC 返回 None。
-
-    选项是 (标题, 说明) 两项，鼠标点或者按数字键都能选。
-    """
+    """画一屏选项 -> 选中的下标；关窗口 / 按 ESC 返回 None（选项是 (标题, 说明) 两项）。"""
     f_title = get_font(30, bold=True)
     f_sub = get_font(14)
     f_btn = get_font(19, bold=True)
@@ -2547,8 +2349,7 @@ def play_match(screen, clock, game, buttons):
             if event.type == pygame.QUIT:
                 running = False
             elif game.battle is not None:
-                # 交战界面是单独的一屏：键盘鼠标都归它管。ESC / R 在这里故意不生效，
-                # 免得打到一半误触把这一局丢了（关窗口仍然可以退出）。
+                        # 交战界面键盘鼠标都归它管；ESC / R 故意不生效，免得误触把这一局丢了
                 battle = game.battle
                 key = event.key if event.type == pygame.KEYDOWN else None
                 if key == pygame.K_UP:                 # 翻看战报随时都行，不算做决定
@@ -2568,8 +2369,8 @@ def play_match(screen, clock, game, buttons):
                     elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                         battle.handle_click(event.pos)
             elif game.grain_pick is not None:
-                # 「带多少粮草」弹窗：这一步的键盘鼠标都归它管，选完才真正落子。
-                # 放在这里是为了盖住下面的空格结束回合 / 点棋盘——不然会带着弹窗走子。
+                # 「带多少粮草」弹窗：这一步的键盘鼠标都归它管；放在前面是为了盖住
+                # 下面的空格结束回合 / 点棋盘，不然会带着弹窗走子
                 pick = game.grain_pick
                 if event.type == pygame.KEYDOWN:
                     step = {pygame.K_LEFT: -1, pygame.K_RIGHT: 1,
@@ -2589,7 +2390,7 @@ def play_match(screen, clock, game, buttons):
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     game.cunning.handle_click(event.pos)
             elif game.aim is not None:
-                # 用计瞄准态：点棋盘上的目标才结算；ESC 只在还没扣代价时管用
+                # 用计瞄准态：点目标才结算
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     game.aim.cancel()
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -2626,12 +2427,11 @@ def play_match(screen, clock, game, buttons):
                 elif hit_button == "quit":
                     running = False
                 elif game.human_may_act():
-                    # 「用计」按钮也在详情框里，先试它
+                    # 「用计」和「吃粮」按钮都长在详情框里，先试它们，再交给棋盘
                     cunning = game.cunning_button()
                     if cunning is not None and cunning.collidepoint(mx, my):
                         game.open_cunning()
                         continue
-                    # 「吃粮」按钮长在选中武将详情框里，先试它，再交给棋盘
                     eat = next((n for _l, rect, n in game.eat_buttons()
                                 if rect.collidepoint(mx, my)), None)
                     if eat is not None:
